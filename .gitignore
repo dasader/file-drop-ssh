@@ -1,0 +1,12 @@
+# Rust
+/target
+
+# Backup files
+**/*.rs.bk
+
+# MSVC
+*.pdb
+
+# Env / secrets
+.env
+*.key
