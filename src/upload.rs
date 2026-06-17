@@ -9,7 +9,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 
 use crate::clipboard::set_clipboard_text;
-use crate::config;
+use crate::config::Server;
 use crate::sys::{log, now_stamp};
 use crate::util::{sanitize_filename, shell_quote};
 use crate::StateKind;
@@ -18,26 +18,29 @@ const SSH_TIMEOUT: u32 = 30;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Entry point for drag-drop and clipboard paste (GUI). Runs on a worker thread
-/// so the UI thread never blocks on ssh.
-pub fn handle_files(files: Vec<PathBuf>) {
+/// so the UI thread never blocks on ssh. `server` is the currently active one.
+pub fn handle_files(files: Vec<PathBuf>, server: Server) {
     crate::set_state(StateKind::Uploading, "Preparing...");
     std::thread::spawn(move || {
-        run(files);
+        run(files, &server);
     });
 }
 
 /// Resolve remote dir, copy remote paths to the clipboard, mkdir+touch, scp.
 /// Synchronous; returns true on full success. Also used by CLI mode.
-pub fn run(files: Vec<PathBuf>) -> bool {
+pub fn run(files: Vec<PathBuf>, server: &Server) -> bool {
     let files: Vec<PathBuf> = files.into_iter().filter(|p| p.exists()).collect();
     if files.is_empty() {
         crate::set_state(StateKind::Error, "No files");
         return false;
     }
 
-    let cfg = config::load();
+    log(&format!(
+        "Upload target: server '{}' alias={}",
+        server.name, server.alias
+    ));
 
-    let remote_dir = match resolve_remote_dir(&cfg.alias, &cfg.remote_dir) {
+    let remote_dir = match resolve_remote_dir(&server.alias, &server.remote_dir) {
         Some(d) => d,
         None => {
             crate::set_state(StateKind::Error, "Remote unreachable");
@@ -74,7 +77,7 @@ pub fn run(files: Vec<PathBuf>) -> bool {
         remote_cmd.push(' ');
         remote_cmd.push_str(&shell_quote(r));
     }
-    if !run_ssh(&cfg.alias, &remote_cmd) {
+    if !run_ssh(&server.alias, &remote_cmd) {
         crate::set_state(StateKind::Error, "Remote prep failed");
         return false;
     }
@@ -89,7 +92,7 @@ pub fn run(files: Vec<PathBuf>) -> bool {
             StateKind::Uploading,
             &format!("Syncing {}/{} {}", i + 1, total, fname),
         );
-        if run_scp(local, &cfg.alias, remote) {
+        if run_scp(local, &server.alias, remote) {
             log(&format!("OK: {} -> {}", local.display(), remote));
         } else {
             log(&format!("FAIL scp: {}", local.display()));

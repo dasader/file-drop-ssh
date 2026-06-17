@@ -23,7 +23,8 @@ AutoHotkey v2 스크립트(`CursorDrop v4`)를 **Rust + windows-sys**로 포팅�
 - **Ctrl+V** (위젯 포커스 상태) → 클립보드 파일 / 비트맵 이미지(PNG 변환) 업로드
 - 원격 `$HOME` 1회 조회로 `~` → 절대경로 변환 (캐시)
 - 백그라운드 스레드에서 `mkdir -p` + `touch` + `scp` (모두 `BatchMode=yes`)
-- 트레이 아이콘 메뉴 (Paste / Show log / Exit)
+- 트레이/우클릭 메뉴 (서버 선택 / Paste / Show log / Exit)
+- **다중 서버**: ini에 여러 서버를 정의하고 우클릭 메뉴에서 활성 서버 전환
 - 상태 색상 피드백 (idle / reading / uploading / success / error)
 - **CLI 모드**: `CursorDrop.exe <파일> [...]` → GUI 없이 업로드 후 종료
 
@@ -39,26 +40,37 @@ Windows 표준(kernel32 / user32 / gdi32 / gdiplus / shell32 / advapi32).
 
 ## 설정 — `CursorDrop.ini`
 
-첫 실행 시 exe 옆에 자동 생성된다.
+첫 실행 시 exe 옆에 자동 생성된다. 서버마다 `[Server:<이름>]` 섹션을 두며,
+섹션 이름이 우클릭 메뉴의 라벨로 쓰인다.
 
 ```ini
-[Remote]
+[Server:prod]
 Alias=myserver
 RemoteDir=~/.cursor-drop-files
+
+[Server:dev]
+Alias=devbox
+RemoteDir=~/uploads
 ```
 
 - `Alias` — `~/.ssh/config` 의 `Host` 별칭. **원격 Claude Code가 도는 호스트**.
 - `RemoteDir` — 업로드 위치. `~` 는 원격 `$HOME` 으로 펼쳐짐. `/` 로 시작하면
   절대경로 그대로 사용. 홈 기준이면 어떤 프로젝트에서 Claude를 돌리든 절대경로로
-  읽을 수 있어 무난하다.
+  읽을 수 있어 무난하다. 생략 시 `~/.cursor-drop-files` 기본값.
+- **활성 서버**: 파일에 나열된 **첫 번째 서버**가 기본 활성. 우클릭 메뉴에서
+  다른 서버를 고르면 활성 전환된다(체크 표시). 이 선택은 **세션 동안만** 유지되며
+  ini에 다시 쓰지 않는다 — 재시작하면 첫 서버로 돌아간다.
+- **하위호환**: 기존 단일 `[Remote]` 섹션도 그대로 인식된다(이름 `Remote`인
+  서버 하나로 취급).
 
 ## 사용
 
 1. `CursorDrop.exe` 더블클릭 → 화면 중앙 알약 + 트레이 아이콘.
-2. 파일을 위젯에 **드래그**하거나, 이미지 복사 후 위젯 클릭→**Ctrl+V**
+2. (서버가 여럿이면) 위젯 **우클릭 → 서버 선택**으로 활성 서버를 고른다.
+3. 파일을 위젯에 **드래그**하거나, 이미지 복사 후 위젯 클릭→**Ctrl+V**
    (또는 위젯 우클릭 → "Paste clipboard").
-3. 업로드되고 원격 절대경로가 **클립보드**에 들어간다.
-4. WezTerm(원격 Claude Code)에서 **`Ctrl+Shift+V`** 로 붙여 넣으면 끝.
+4. 업로드되고 원격 절대경로가 **클립보드**에 들어간다.
+5. WezTerm(원격 Claude Code)에서 **`Ctrl+Shift+V`** 로 붙여 넣으면 끝.
 
 - 위젯 클릭 드래그로 이동, `Esc` 종료, 트레이/우클릭 메뉴.
 - 로그: exe 옆 `CursorDrop.log`.
@@ -77,7 +89,7 @@ RemoteDir=~/.cursor-drop-files
 |------|------|
 | `src/util.rs` | 순수 문자열 로직(셸 인용·파일명 정리) + 단위 테스트 |
 | `src/sys.rs` | UTF-16 변환·타임스탬프·로그·경로 |
-| `src/config.rs` | `CursorDrop.ini` 로드/기본생성 |
+| `src/config.rs` | `CursorDrop.ini` 로드/기본생성 + 다중 서버 파서(단위 테스트) |
 | `src/clipboard.rs` | 클립보드 파일/비트맵(GDI+ PNG) + 텍스트 설정 |
 | `src/upload.rs` | 원격 `$HOME` 해석 + 경로계산 + 클립보드 + scp(워커 스레드) |
 | `src/main.rs` | 윈도/WndProc/트레이/상태머신/입력/CLI |

@@ -16,8 +16,10 @@ use core::ffi::c_void;
 use core::mem::{size_of, zeroed};
 use core::ptr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
+
+use config::Server;
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
@@ -41,7 +43,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     PostMessageW, PostQuitMessage, RegisterClassExW, SendMessageW,
     SetForegroundWindow, SetLayeredWindowAttributes, SetTimer, SetWindowPos, TrackPopupMenu,
     CS_HREDRAW, CS_VREDRAW, GetMessageW, DispatchMessageW, TranslateMessage, HWND_TOPMOST,
-    IDC_ARROW, LWA_ALPHA, MF_SEPARATOR, MF_STRING, MSG, SM_CXSCREEN, SM_CYSCREEN, SWP_NOMOVE,
+    IDC_ARROW, LWA_ALPHA, MF_CHECKED, MF_SEPARATOR, MF_STRING, MSG, SM_CXSCREEN, SM_CYSCREEN, SWP_NOMOVE,
     SWP_NOSIZE, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP, WM_CONTEXTMENU, WM_DESTROY, WM_DROPFILES,
     WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_NCLBUTTONDOWN, WM_PAINT,
     WM_RBUTTONUP, WM_TIMER, WNDCLASSEXW, WS_EX_ACCEPTFILES, WS_EX_LAYERED, WS_EX_TOOLWINDOW,
@@ -58,6 +60,8 @@ const TIMER_REVERT: usize = 1;
 const ID_PASTE: usize = 101;
 const ID_LOG: usize = 102;
 const ID_EXIT: usize = 103;
+/// Server menu items get command IDs `ID_SERVER_BASE + index`.
+const ID_SERVER_BASE: usize = 200;
 
 const VK_CONTROL: i32 = 0x11;
 const VK_ESCAPE: usize = 0x1B;
@@ -84,6 +88,22 @@ static STATE: Mutex<UiState> = Mutex::new(UiState {
 static HWND_MAIN: AtomicIsize = AtomicIsize::new(0);
 static DARK: AtomicBool = AtomicBool::new(true);
 
+// Configured servers (loaded once at startup) and the active selection.
+// The active index is session-only — never written back to the ini.
+static SERVERS: OnceLock<Vec<Server>> = OnceLock::new();
+static ACTIVE: AtomicUsize = AtomicUsize::new(0);
+
+fn servers() -> &'static [Server] {
+    SERVERS.get_or_init(config::load)
+}
+
+/// The currently active server, clamped to a valid index.
+fn active_server() -> Server {
+    let list = servers();
+    let idx = ACTIVE.load(Ordering::Relaxed).min(list.len() - 1);
+    list[idx].clone()
+}
+
 // ---------------------------------------------------------------------------
 // State (callable from worker threads)
 // ---------------------------------------------------------------------------
@@ -106,14 +126,14 @@ fn do_paste() {
     set_state(StateKind::Reading, "");
     let files = clipboard::read_clipboard_files();
     if !files.is_empty() {
-        upload::handle_files(files);
+        upload::handle_files(files, active_server());
         return;
     }
     if clipboard::clipboard_has_bitmap() {
         let out = sys::clip_dir().join(format!("clip-{}.png", sys::now_stamp()));
         if clipboard::save_clipboard_bitmap_png(&out) {
             sys::log(&format!("Bitmap saved: {}", out.display()));
-            upload::handle_files(vec![out]);
+            upload::handle_files(vec![out], active_server());
         } else {
             set_state(StateKind::Error, "Bitmap save failed");
         }
@@ -292,6 +312,20 @@ unsafe fn remove_tray(hwnd: HWND) {
 
 unsafe fn show_menu(hwnd: HWND) {
     let menu = CreatePopupMenu();
+
+    // Server list (only when more than one is configured). The active server is
+    // checkmarked; clicking another switches the active selection for this
+    // session. With a single server the menu looks exactly as before.
+    let list = servers();
+    if list.len() > 1 {
+        let active = ACTIVE.load(Ordering::Relaxed).min(list.len() - 1);
+        for (i, s) in list.iter().enumerate() {
+            let flags = MF_STRING | (if i == active { MF_CHECKED } else { 0 });
+            AppendMenuW(menu, flags, ID_SERVER_BASE + i, sys::wide(&s.name).as_ptr());
+        }
+        AppendMenuW(menu, MF_SEPARATOR, 0, ptr::null());
+    }
+
     AppendMenuW(menu, MF_STRING, ID_PASTE, sys::wide("Paste clipboard").as_ptr());
     AppendMenuW(menu, MF_SEPARATOR, 0, ptr::null());
     AppendMenuW(menu, MF_STRING, ID_LOG, sys::wide("Show log").as_ptr());
@@ -312,7 +346,14 @@ unsafe fn show_menu(hwnd: HWND) {
     );
     DestroyMenu(menu);
 
-    match cmd as usize {
+    let cmd = cmd as usize;
+    if cmd >= ID_SERVER_BASE && cmd < ID_SERVER_BASE + list.len() {
+        let idx = cmd - ID_SERVER_BASE;
+        ACTIVE.store(idx, Ordering::Relaxed);
+        sys::log(&format!("Active server: {}", list[idx].name));
+        return;
+    }
+    match cmd {
         ID_PASTE => do_paste(),
         ID_LOG => {
             let _ = std::process::Command::new("notepad")
@@ -345,7 +386,7 @@ unsafe fn handle_drop(wparam: WPARAM) {
         return;
     }
     set_state(StateKind::Reading, "");
-    upload::handle_files(files);
+    upload::handle_files(files, active_server());
 }
 
 // ---------------------------------------------------------------------------
@@ -510,11 +551,17 @@ fn main() {
     if !args.is_empty() {
         sys::log(&format!("CLI mode: {} arg(s)", args.len()));
         let files: Vec<PathBuf> = args.iter().map(PathBuf::from).collect();
-        let ok = upload::run(files);
+        let ok = upload::run(files, &active_server());
         std::process::exit(if ok { 0 } else { 1 });
     }
 
-    sys::log(&format!("CursorDrop started ({}x{})", PILL_W, PILL_H));
+    // Load servers up front so the startup log lists them and the menu is ready.
+    sys::log(&format!(
+        "CursorDrop started ({}x{}), {} server(s)",
+        PILL_W,
+        PILL_H,
+        servers().len()
+    ));
 
     unsafe {
         DARK.store(detect_dark(), Ordering::Relaxed);
