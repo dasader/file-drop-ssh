@@ -1,0 +1,15 @@
+#!/data/data/com.termux/files/usr/bin/bash
+#
+# Termux share/open hook for FILES. Install as ~/bin/termux-file-editor.
+# When you "Share -> Termux" (or "Open with -> Termux") a file, Termux runs this
+# with the local file path(s) as arguments. We hand them straight to CursorDrop.
+#
+# If you also want a server picker on every share, set CURSOR_DROP_PROMPT=1 here.
+# export CURSOR_DROP_PROMPT=1
+
+DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ -x "$DIR/cursor-drop.sh" ]; then
+    exec "$DIR/cursor-drop.sh" "$@"
+else
+    exec cursor-drop.sh "$@"
+fi

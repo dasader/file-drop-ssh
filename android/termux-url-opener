@@ -1,0 +1,41 @@
+#!/data/data/com.termux/files/usr/bin/bash
+#
+# Termux share hook for TEXT / URLs. Install as ~/bin/termux-url-opener.
+# Termux runs this with the shared text/URL on STDIN. Some Android versions route
+# a shared file through here as a path (or a content:// URI) instead of through
+# termux-file-editor, so we cope with both: a real local path is uploaded, a
+# content:// URI is staged via termux-storage-get, anything else is reported.
+
+DIR="$(cd "$(dirname "$0")" && pwd)"
+drop() {
+    if [ -x "$DIR/cursor-drop.sh" ]; then "$DIR/cursor-drop.sh" "$@"; else cursor-drop.sh "$@"; fi
+}
+
+read -r value
+
+case "$value" in
+    /*|file://*)
+        path="${value#file://}"
+        if [ -f "$path" ]; then drop "$path"; else
+            command -v termux-toast >/dev/null 2>&1 && termux-toast "CursorDrop: not a file: $path"
+        fi
+        ;;
+    content://*)
+        # Stage the content URI to a temp file, then upload that.
+        if command -v termux-storage-get >/dev/null 2>&1; then
+            tmp="$(mktemp "${TMPDIR:-/data/data/com.termux/files/usr/tmp}/cursordrop.XXXXXX")"
+            # termux-storage-get writes the picked/streamed content to the given path
+            termux-storage-get "$tmp" "$value" 2>/dev/null
+            if [ -s "$tmp" ]; then drop "$tmp"; rm -f "$tmp"; else
+                rm -f "$tmp"
+                command -v termux-toast >/dev/null 2>&1 && termux-toast "CursorDrop: could not read shared content"
+            fi
+        else
+            command -v termux-toast >/dev/null 2>&1 && termux-toast "CursorDrop: install Termux:API to share files"
+        fi
+        ;;
+    *)
+        command -v termux-toast >/dev/null 2>&1 && \
+            termux-toast "CursorDrop only handles files, not URLs/text"
+        ;;
+esac
