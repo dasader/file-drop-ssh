@@ -6,6 +6,10 @@ AutoHotkey v2 스크립트(`CursorDrop v4`)를 **Rust + windows-sys**로 포팅�
 절대경로를 클립보드에 복사**한다. 터미널(WezTerm 등)에서 SSH로 접속해 돌리는
 **원격 Claude Code**에 `Ctrl+Shift+V` 로 경로를 붙여 넣어 쓰는 용도.
 
+> **Android/Termux 포팅**도 있다 — 드래그 드롭 대신 **공유 시트**로 같은 흐름을
+> 구현한 별도 셸 스크립트. `android/` 폴더와 아래 [Android / Termux 포팅](#android--termux-포팅)
+> 절을 참고. Rust 크레이트와 코드를 공유하지 않지만 `CursorDrop.ini` 형식·동작은 동일.
+
 ## 동작 모드 (터미널 모드)
 
 원본 AHK는 Cursor/VS Code GUI 창의 `[SSH: alias]` 타이틀을 읽어 원격 경로를
@@ -95,6 +99,55 @@ RemoteDir=~/uploads
 | `src/main.rs` | 윈도/WndProc/트레이/상태머신/입력/CLI |
 
 테스트: `cargo test`.
+
+## Android / Termux 포팅
+
+Windows 알약 위젯의 흐름을 **Android 공유 시트** 기반으로 옮긴 별도 구현.
+Rust 크레이트와 코드를 공유하지 않는 **독립 셸 스크립트**다(`android/` 폴더).
+
+> **파일 공유 → Termux** ⇒ 활성 서버로 `scp` 업로드 + 원격 절대경로를 클립보드에
+> 복사. Terminus/Termux의 원격 Claude Code 프롬프트에 길게 눌러 붙여 넣는다.
+
+| 파일 | 역할 |
+|------|------|
+| `cursor-drop.sh` | 전체 흐름: INI 파싱·서버 선택·`~`/`$HOME` 해석·클립보드·`ssh`/`scp` |
+| `termux-file-editor` | "**파일** 공유 → Termux" 훅 → 경로로 `cursor-drop.sh` 호출 |
+| `termux-url-opener` | "**텍스트/URL** 공유 → Termux" 훅 → stdin의 경로/`content://` URI 처리 |
+| `CursorDrop.ini` | 다중 서버 설정 예시 |
+
+### 요구 사항
+
+- **Termux** + **Termux:API** (F-Droid 빌드 권장). `termux-clipboard-set`,
+  `termux-toast`, `termux-dialog` 등을 제공.
+- 각 서버에 대한 **무암호 SSH 키 인증**. 데스크톱 앱과 동일하게 `BatchMode=yes`
+  라서 passphrase 프롬프트가 뜨면 실패한다.
+
+### 설치
+
+```bash
+pkg update && pkg install openssh termux-api
+mkdir -p ~/bin ~/.config/cursor-drop
+
+cp android/cursor-drop.sh      ~/bin/cursor-drop.sh
+cp android/termux-file-editor  ~/bin/termux-file-editor
+cp android/termux-url-opener   ~/bin/termux-url-opener
+chmod +x ~/bin/cursor-drop.sh ~/bin/termux-file-editor ~/bin/termux-url-opener
+
+cp android/CursorDrop.ini ~/.config/cursor-drop/CursorDrop.ini   # Alias/RemoteDir 수정
+```
+
+### 서버 선택
+
+데스크톱 앱과 달리 활성 서버가 **저장**된다(`~/.config/cursor-drop/active`).
+
+```bash
+cursor-drop.sh list        # 서버 목록, '*' 가 활성
+cursor-drop.sh pick        # 라디오 다이얼로그로 선택
+cursor-drop.sh use dev     # 이름으로 활성 지정
+```
+
+매 공유마다 대상 서버를 묻고 싶으면(저장된 활성은 안 바뀜) `CURSOR_DROP_PROMPT=1`
+설정. 자세한 내용은 `android/README.md` 참고.
 
 ## 검증 (myserver 실측)
 

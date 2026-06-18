@@ -12,6 +12,10 @@ Claude Code session running over SSH in a terminal (WezTerm). It does NOT
 auto-paste or inspect any editor window — the target host/dir come from
 `CursorDrop.ini` next to the exe.
 
+A second, **independent** implementation lives in `android/` — a Termux shell
+port driven by the Android share sheet (see "Android/Termux port" below). It
+shares the `CursorDrop.ini` format and behavior but no code with the Rust crate.
+
 ## Build / test
 
 Shipping build runs on Windows (MSVC, static CRT → standalone exe):
@@ -64,6 +68,27 @@ menu lists servers (checkmark on active) when there's more than one; selecting o
 just updates `ACTIVE`. `upload::run(files, &Server)` always uploads to the active
 server. CLI mode (`CursorDrop.exe <file>...`) uses the active (= first) server and
 exits.
+
+## Android/Termux port (`android/`)
+
+A self-contained shell reimplementation — **builds from / depends on nothing in
+the Rust crate**, so changes to one side don't touch the other. Keep behavior in
+sync manually (naming, sanitize rules, scp/clipboard quoting, multi-server INI
+parsing) — those parity points are listed in `android/README.md`.
+
+| File | Role |
+|------|------|
+| `cursor-drop.sh` | the whole flow: INI parse, server select, `~`/`$HOME` resolve, clipboard, `ssh`/`scp` |
+| `termux-file-editor` | "Share a **file** → Termux" hook → calls `cursor-drop.sh` with path(s) |
+| `termux-url-opener` | "Share **text/URL** → Termux" hook → handles a path / `content://` URI on stdin |
+| `CursorDrop.ini` | example multi-server config |
+
+Differs from the desktop app in how the active server is handled: it **is**
+persisted (to `~/.config/cursor-drop/active`), unlike the Rust app's session-only
+`ACTIVE`. Subcommands: `list` / `pick` / `use <name>`; `CURSOR_DROP_PROMPT=1`
+asks per-share without changing the saved active. No native build/test — it's a
+script; test by running `cursor-drop.sh <file>` under Termux (needs `openssh` +
+`termux-api`).
 
 ## Gotchas / invariants
 
