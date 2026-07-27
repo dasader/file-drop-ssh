@@ -50,7 +50,8 @@ Success/Error auto-revert to Idle on a timer.
 
 **Look**: one surface colour per theme (never per state) — the state is carried
 by the accent rail left of the text and by the progress bar along the bottom
-edge while files move. Every shape is a rectangle because GDI cannot antialias;
+edge while files move. The active server's alias sits right-aligned on the title
+row in every state, so the target is never invisible. Every shape is a rectangle because GDI cannot antialias;
 the only curve is the window region. All geometry is written in 96-dpi units and
 goes through `px()`; the process is per-monitor-dpi aware (`SetProcessDpiAwarenessContext`
 at startup, `apply_dpi()` on `WM_DPICHANGED`), which is what keeps text sharp on
@@ -110,6 +111,11 @@ script; test by running `cursor-drop.sh <file>` under Termux (needs `openssh` +
   keep it that way. A server is dropped if it has no `Alias`; `RemoteDir` defaults
   when omitted; `load()` guarantees at least one server.
 - Remote `$HOME` is queried once per alias and cached (for `~` expansion).
+- **The first-run prompt is derived, not pushed**: `current_visual()` shows
+  "Add your server" whenever the active alias is still `config::PLACEHOLDER_ALIAS`
+  and no state has a message, so it also returns after every auto-revert. Keep
+  `PLACEHOLDER_ALIAS` equal to the alias in `DEFAULT_INI`
+  (`default_ini_is_a_placeholder` fails otherwise) or the prompt never appears.
 - **Flush is `rm -f <dir>/*`** — top level only, always confirmed in the UI, and
   refused when the resolved dir is shorter than 2 chars or equals the remote
   `$HOME`. Keep both guards if you touch it.

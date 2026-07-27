@@ -27,9 +27,11 @@ AutoHotkey v2 스크립트(`CursorDrop v4`)를 **Rust + windows-sys**로 포팅�
 - **Ctrl+V** (위젯 포커스 상태) → 클립보드 파일 / 비트맵 이미지(PNG 변환) 업로드
 - 원격 `$HOME` 1회 조회로 `~` → 절대경로 변환 (캐시)
 - 백그라운드 스레드에서 `mkdir -p` + `touch` + `scp` (모두 `BatchMode=yes`)
-- 우클릭 메뉴 (서버 선택 / Paste / Flush remote files / Show log / Exit)
+- 우클릭 메뉴 (서버 선택 / Paste / Flush remote files / Edit config / Show log / Exit)
 - **다중 서버**: ini에 여러 서버를 정의하고 우클릭 메뉴에서 활성 서버 전환
 - 상태 표시: 좌측 액센트 레일 색 + 전송 중 하단 진행 막대 (idle / uploading / success / error)
+- 위젯 우측 상단에 **현재 활성 서버 alias** 상시 표시 (우클릭으로 전환하면 즉시 반영)
+- ini가 없거나 기본 placeholder(`myserver`) 그대로면 위젯이 **"Add your server"** 안내로 바뀐다
 - **CLI 모드**: `CursorDrop.exe <파일> [...]` → GUI 없이 업로드 후 종료
 
 ## 빌드
@@ -44,8 +46,10 @@ Windows 표준(kernel32 / user32 / gdi32 / gdiplus / shell32 / advapi32).
 
 ## 설정 — `CursorDrop.ini`
 
-첫 실행 시 exe 옆에 자동 생성된다. 서버마다 `[Server:<이름>]` 섹션을 두며,
-섹션 이름이 우클릭 메뉴의 라벨로 쓰인다.
+첫 실행 시 exe 옆에 자동 생성된다(쓰기 권한이 없으면 메모리상 기본값으로 동작).
+서버마다 `[Server:<이름>]` 섹션을 두며, 섹션 이름이 우클릭 메뉴의 라벨로 쓰인다.
+`Alias`가 기본값 `myserver` 그대로인 동안에는 위젯이 설정 안내를 띄우고,
+우클릭 → **Edit config** 로 이 파일을 바로 열 수 있다.
 
 ```ini
 [Server:prod]

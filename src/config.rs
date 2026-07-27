@@ -14,6 +14,11 @@ pub struct Server {
 
 const DEFAULT_REMOTE_DIR: &str = "~/.cursor-drop-files";
 
+/// The alias written into the default ini. Nothing can be uploaded until the
+/// user replaces it, so the widget offers setup instead of failing at the first
+/// ssh. Kept in step with DEFAULT_INI by `default_ini_is_a_placeholder`.
+pub const PLACEHOLDER_ALIAS: &str = "myserver";
+
 const DEFAULT_INI: &str = "\
 ; CursorDrop config — list servers as [Server:<name>] sections.
 ;   Alias     = SSH host alias from your ~/.ssh/config (the host Claude Code runs on)
@@ -159,12 +164,14 @@ RemoteDir=~/uploads
     }
 
     /// `load()` relies on this: a garbage ini falls back to `parse(DEFAULT_INI)`,
-    /// and callers index `servers()[0]`.
+    /// and callers index `servers()[0]`. The alias must stay the placeholder the
+    /// widget recognizes, or the setup prompt never appears.
     #[test]
-    fn default_ini_has_one_server() {
+    fn default_ini_is_a_placeholder() {
         let s = parse(DEFAULT_INI);
         assert_eq!(s.len(), 1);
         assert_eq!(s[0].name, "prod");
+        assert_eq!(s[0].alias, PLACEHOLDER_ALIAS);
         assert_eq!(s[0].remote_dir, DEFAULT_REMOTE_DIR);
     }
 
