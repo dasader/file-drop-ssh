@@ -20,7 +20,7 @@ const DEFAULT_INI: &str = "\
 ;   RemoteDir = upload target on the remote. '~' expands to the remote $HOME;
 ;               an absolute path (starting with '/') is used as-is.
 ; Right-click the widget to switch the active server. The first server listed is
-; the default active one. (The legacy [Remote] section is still recognized.)
+; the default active one.
 [Server:prod]
 Alias=myserver
 RemoteDir=~/.cursor-drop-files
@@ -62,11 +62,10 @@ pub fn load() -> Vec<Server> {
 
 /// Parse INI text into a list of servers. Pure (no I/O) so it is unit-testable.
 ///
-/// A new server starts at a `[Server:<name>]` header (name = `<name>`) or a
-/// legacy `[Remote]` header (name = `Remote`). Other section headers are
-/// ignored. `Alias` / `RemoteDir` keys apply to the server currently being
-/// built. A server is only kept if it has a non-empty `Alias`; its `RemoteDir`
-/// falls back to the default when omitted.
+/// A new server starts at a `[Server:<name>]` header (name = `<name>`); other
+/// section headers are ignored. `Alias` / `RemoteDir` keys apply to the server
+/// currently being built. A server is only kept if it has a non-empty `Alias`;
+/// its `RemoteDir` falls back to the default when omitted.
 fn parse(text: &str) -> Vec<Server> {
     let mut servers: Vec<Server> = Vec::new();
     // (name, alias, remote_dir) for the server currently being built.
@@ -98,8 +97,6 @@ fn parse(text: &str) -> Vec<Server> {
                 if !name.is_empty() {
                     cur = Some((name.to_string(), String::new(), String::new()));
                 }
-            } else if section.eq_ignore_ascii_case("Remote") {
-                cur = Some(("Remote".to_string(), String::new(), String::new()));
             }
             // Unknown sections leave `cur` as None, so their keys are ignored.
             continue;
@@ -149,19 +146,6 @@ RemoteDir=~/uploads
     }
 
     #[test]
-    fn legacy_remote_section_is_recognized() {
-        let ini = "\
-[Remote]
-Alias=myserver
-RemoteDir=~/.cursor-drop-files
-";
-        let s = parse(ini);
-        assert_eq!(s.len(), 1);
-        assert_eq!(s[0].name, "Remote");
-        assert_eq!(s[0].alias, "myserver");
-    }
-
-    #[test]
     fn remote_dir_defaults_when_omitted() {
         let s = parse("[Server:x]\nAlias=h\n");
         assert_eq!(s.len(), 1);
@@ -188,6 +172,8 @@ RemoteDir=~/.cursor-drop-files
     fn empty_or_garbage_yields_no_servers() {
         assert!(parse("").is_empty());
         assert!(parse("; just a comment\n[Other]\nkey=val\n").is_empty());
+        // The legacy [Remote] section is no longer recognized.
+        assert!(parse("[Remote]\nAlias=myserver\n").is_empty());
     }
 
     #[test]

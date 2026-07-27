@@ -14,21 +14,25 @@ use core::ffi::c_void;
 use core::mem::{size_of, zeroed};
 use core::ptr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use config::Server;
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    BeginPaint, CreateFontW, CreatePen, CreateRoundRectRgn, CreateSolidBrush, DeleteObject,
-    DrawTextW, EndPaint, FillRect, GetStockObject, InvalidateRect, RoundRect, SelectObject,
-    SetBkMode, SetTextColor, SetWindowRgn, DT_CENTER, DT_SINGLELINE, DT_VCENTER, HFONT,
-    NULL_BRUSH, PAINTSTRUCT, PS_SOLID,
+    BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, CreatePen,
+    CreateRoundRectRgn, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, EndPaint, FillRect,
+    GetStockObject, InvalidateRect, RoundRect, SelectObject, SetBkMode, SetTextColor, SetWindowRgn,
+    DT_END_ELLIPSIS, DT_LEFT, DT_SINGLELINE, DT_VCENTER, HDC, HFONT, NULL_BRUSH, PAINTSTRUCT,
+    PS_SOLID, SRCCOPY,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Registry::{
     RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD,
+};
+use windows_sys::Win32::UI::HiDpi::{
+    GetDpiForWindow, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, ReleaseCapture, VK_CONTROL, VK_ESCAPE, VK_V,
@@ -38,18 +42,26 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
     GetClientRect, GetCursorPos, GetSystemMetrics, KillTimer, LoadCursorW,
     PostMessageW, PostQuitMessage, RegisterClassExW, SendMessageW,
-    SetForegroundWindow, SetLayeredWindowAttributes, SetTimer, SetWindowPos, TrackPopupMenu,
+    SetForegroundWindow, SetTimer, SetWindowPos, TrackPopupMenu,
     CS_HREDRAW, CS_VREDRAW, GetMessageW, DispatchMessageW, TranslateMessage, HWND_TOPMOST,
-    MessageBoxW, IDC_ARROW, IDYES, LWA_ALPHA, MB_ICONWARNING, MB_YESNO, MF_CHECKED, MF_SEPARATOR,
-    MF_STRING, MSG, SM_CXSCREEN, SM_CYSCREEN, SWP_NOMOVE,
-    SWP_NOSIZE, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP, WM_DESTROY, WM_DROPFILES,
+    MessageBoxW, IDC_ARROW, IDYES, MB_ICONWARNING, MB_YESNO, MF_CHECKED, MF_SEPARATOR,
+    MF_STRING, MSG, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE,
+    TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP, WM_DESTROY, WM_DPICHANGED, WM_DROPFILES,
     WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_NCLBUTTONDOWN, WM_PAINT,
-    WM_RBUTTONUP, WM_TIMER, WNDCLASSEXW, WS_EX_ACCEPTFILES, WS_EX_LAYERED, WS_EX_TOOLWINDOW,
+    WM_RBUTTONUP, WM_TIMER, WNDCLASSEXW, WS_EX_ACCEPTFILES, WS_EX_TOOLWINDOW,
     WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE, HTCAPTION,
 };
 
-const PILL_W: i32 = 160;
-const PILL_H: i32 = 52;
+// Layout in 96-dpi units; everything on screen goes through px().
+const PILL_W: i32 = 216;
+const PILL_H: i32 = 64;
+const RADIUS: i32 = 16;
+const PAD: i32 = 16;
+const RAIL_W: i32 = 3;
+const RAIL_H: i32 = 30;
+const TEXT_X: i32 = 34;
+const TITLE_H: i32 = 20;
+const SUB_H: i32 = 18;
 
 const WM_APP_STATE: u32 = WM_APP + 1;
 const TIMER_REVERT: usize = 1;
@@ -71,15 +83,27 @@ pub enum StateKind {
 
 struct UiState {
     kind: StateKind,
-    detail: String,
+    title: String,
+    sub: String,
+    /// 0.0 = no bar; otherwise the fraction of the transfer that is done.
+    progress: f32,
 }
 
 static STATE: Mutex<UiState> = Mutex::new(UiState {
     kind: StateKind::Idle,
-    detail: String::new(),
+    title: String::new(),
+    sub: String::new(),
+    progress: 0.0,
 });
 static HWND_MAIN: AtomicIsize = AtomicIsize::new(0);
 static DARK: AtomicBool = AtomicBool::new(true);
+/// Monitor dpi the window is currently on; 96 until the window exists.
+static DPI: AtomicI32 = AtomicI32::new(96);
+
+/// A 96-dpi design unit in real pixels.
+fn px(v: i32) -> i32 {
+    v * DPI.load(Ordering::Relaxed) / 96
+}
 
 // Configured servers (loaded once at startup) and the active selection.
 // The active index is session-only — never written back to the ini.
@@ -100,12 +124,30 @@ fn active_server() -> Server {
 // ---------------------------------------------------------------------------
 // State (callable from worker threads)
 // ---------------------------------------------------------------------------
-pub fn set_state(kind: StateKind, detail: &str) {
+pub fn set_state(kind: StateKind, title: &str, sub: &str) {
     {
         let mut s = STATE.lock().unwrap();
         s.kind = kind;
-        s.detail = detail.to_string();
+        s.title = title.to_string();
+        s.sub = sub.to_string();
+        // A running transfer keeps its bar across the per-file label changes;
+        // any other state ends it.
+        if !matches!(kind, StateKind::Uploading) {
+            s.progress = 0.0;
+        }
     }
+    repaint();
+}
+
+/// How far along the current transfer is (drives the bar at the bottom edge).
+pub fn set_progress(done: usize, total: usize) {
+    if total > 0 {
+        STATE.lock().unwrap().progress = done as f32 / total as f32;
+        repaint();
+    }
+}
+
+fn repaint() {
     let h = HWND_MAIN.load(Ordering::SeqCst);
     if h != 0 {
         unsafe { PostMessageW(h as *mut c_void, WM_APP_STATE, 0, 0) };
@@ -129,15 +171,21 @@ fn do_paste() {
             sys::log(&format!("Bitmap saved: {}", out.display()));
             upload::handle_files(vec![out], active_server());
         } else {
-            set_state(StateKind::Error, "Bitmap save failed");
+            set_state(StateKind::Error, "Image not saved", "Could not write the PNG");
         }
         return;
     }
-    set_state(StateKind::Error, "Empty clipboard");
+    set_state(StateKind::Error, "Nothing to paste", "No files or image on the clipboard");
 }
 
 // ---------------------------------------------------------------------------
 // Drawing
+//
+// One surface colour, one type scale, and a single accent that carries the
+// state: an upright rail beside the text, plus a bar along the bottom edge
+// while files are moving. Everything is a rectangle, so it stays crisp at any
+// dpi — GDI cannot antialias a shape, and a jagged circle is what "cheap" looks
+// like.
 // ---------------------------------------------------------------------------
 type Rgb = (u8, u8, u8);
 
@@ -146,46 +194,60 @@ fn rgb((r, g, b): Rgb) -> u32 {
 }
 
 struct Pal {
-    bg: Rgb,
-    text: Rgb,
-    sub: Rgb,
+    surface: Rgb,
     border: Rgb,
+    title: Rgb,
+    sub: Rgb,
+    accent: Rgb,
 }
 
 fn palette(kind: StateKind, dark: bool) -> Pal {
     use StateKind::*;
-    if dark {
+    let accent = if dark {
         match kind {
-            Idle => Pal { bg: (0x20, 0x20, 0x22), text: (0xE6, 0xE6, 0xE6), sub: (0x8C, 0x8C, 0x8C), border: (0x4C, 0x7A, 0x62) },
-            Uploading => Pal { bg: (0x2E, 0x28, 0x18), text: (0xE8, 0xC8, 0x6A), sub: (0xBF, 0xA4, 0x4E), border: (0xC9, 0xA8, 0x4E) },
-            Success => Pal { bg: (0x1B, 0x33, 0x28), text: (0x7F, 0xD4, 0xA0), sub: (0x5A, 0xA8, 0x7A), border: (0x5A, 0xC0, 0x8A) },
-            Error => Pal { bg: (0x35, 0x1E, 0x1E), text: (0xE8, 0x70, 0x70), sub: (0xC0, 0x50, 0x50), border: (0xC8, 0x5C, 0x5C) },
+            Idle => (0x55, 0x60, 0x70),
+            Uploading => (0xE0, 0xA6, 0x4A),
+            Success => (0x58, 0xC9, 0x8B),
+            Error => (0xE4, 0x68, 0x5E),
         }
     } else {
         match kind {
-            Idle => Pal { bg: (0xFB, 0xFB, 0xFC), text: (0x22, 0x22, 0x22), sub: (0x99, 0x99, 0x99), border: (0x9C, 0xC7, 0xAE) },
-            Uploading => Pal { bg: (0xFF, 0xF5, 0xE0), text: (0xB8, 0x8A, 0x20), sub: (0xD4, 0xA8, 0x30), border: (0xD9, 0xC0, 0x7A) },
-            Success => Pal { bg: (0xE8, 0xF5, 0xEC), text: (0x2E, 0x8B, 0x4E), sub: (0x5A, 0xA8, 0x7A), border: (0x8F, 0xC9, 0xA8) },
-            Error => Pal { bg: (0xFD, 0xE8, 0xE8), text: (0xC0, 0x30, 0x30), sub: (0xD0, 0x50, 0x50), border: (0xD9, 0x9A, 0x9A) },
+            Idle => (0x9A, 0xA2, 0xAF),
+            Uploading => (0xC8, 0x8A, 0x1E),
+            Success => (0x2F, 0xA0, 0x66),
+            Error => (0xD0, 0x4A, 0x40),
+        }
+    };
+    if dark {
+        Pal {
+            surface: (0x1A, 0x1A, 0x1F),
+            border: (0x30, 0x30, 0x3A),
+            title: (0xF1, 0xF0, 0xF4),
+            sub: (0x8C, 0x89, 0x96),
+            accent,
+        }
+    } else {
+        Pal {
+            surface: (0xFF, 0xFF, 0xFF),
+            border: (0xDE, 0xDC, 0xE2),
+            title: (0x16, 0x15, 0x1A),
+            sub: (0x74, 0x71, 0x7C),
+            accent,
         }
     }
 }
 
-fn current_visual() -> (Pal, String, String) {
-    let (kind, detail) = {
+fn current_visual() -> (Pal, String, String, f32) {
+    let (kind, title, sub, progress) = {
         let s = STATE.lock().unwrap();
-        (s.kind, s.detail.clone())
+        (s.kind, s.title.clone(), s.sub.clone(), s.progress)
     };
-    let dark = DARK.load(Ordering::Relaxed);
-    let pal = palette(kind, dark);
-    // Uploading/Success/Error always carry a detail string from set_state().
-    let (label, subtext) = match kind {
-        StateKind::Idle => ("Drop / Paste".to_string(), "Ctrl+V or drag files".to_string()),
-        StateKind::Uploading => (detail, "Syncing to remote".to_string()),
-        StateKind::Success => (detail, "Ctrl+Shift+V to paste".to_string()),
-        StateKind::Error => (detail, "Check log".to_string()),
-    };
-    (pal, label, subtext)
+    let pal = palette(kind, DARK.load(Ordering::Relaxed));
+    // Idle is the one state with nothing to report, so it speaks for itself.
+    if title.is_empty() {
+        return (pal, "Drop or paste".into(), "Ctrl+V or drag files here".into(), 0.0);
+    }
+    (pal, title, sub, progress)
 }
 
 unsafe fn make_font(height: i32, weight: i32) -> HFONT {
@@ -195,56 +257,87 @@ unsafe fn make_font(height: i32, weight: i32) -> HFONT {
     )
 }
 
+unsafe fn fill(hdc: HDC, x: i32, y: i32, w: i32, h: i32, color: Rgb) {
+    let brush = CreateSolidBrush(rgb(color));
+    let rc = RECT { left: x, top: y, right: x + w, bottom: y + h };
+    FillRect(hdc, &rc, brush);
+    DeleteObject(brush);
+}
+
+/// One line, vertically centred in its slot, ellipsized rather than clipped —
+/// remote file names are long and the widget is not.
+unsafe fn draw_line(
+    hdc: HDC,
+    text: &str,
+    (left, top, right, height): (i32, i32, i32, i32),
+    size: i32,
+    weight: i32,
+    color: Rgb,
+) {
+    let font = make_font(-size, weight);
+    let old = SelectObject(hdc, font);
+    SetTextColor(hdc, rgb(color));
+    let mut rc = RECT { left, top, right, bottom: top + height };
+    let w = sys::wide(text);
+    DrawTextW(
+        hdc,
+        w.as_ptr(),
+        -1,
+        &mut rc,
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+    );
+    SelectObject(hdc, old);
+    DeleteObject(font);
+}
+
 unsafe fn paint(hwnd: HWND) {
     let mut ps: PAINTSTRUCT = zeroed();
-    let hdc = BeginPaint(hwnd, &mut ps);
+    let screen = BeginPaint(hwnd, &mut ps);
 
     let mut rc: RECT = zeroed();
     GetClientRect(hwnd, &mut rc);
-    let h = rc.bottom;
+    let (w, h) = (rc.right, rc.bottom);
+    let (pal, title, sub, progress) = current_visual();
 
-    let (pal, label, subtext) = current_visual();
-    let w = rc.right;
+    // Draw off-screen and blit once: repainting the surface under the text in
+    // place makes the label flash on every progress update.
+    let hdc = CreateCompatibleDC(screen);
+    let bmp = CreateCompatibleBitmap(screen, w, h);
+    let old_bmp = SelectObject(hdc, bmp);
 
-    let brush = CreateSolidBrush(rgb(pal.bg));
-    FillRect(hdc, &rc, brush);
-    DeleteObject(brush);
+    fill(hdc, 0, 0, w, h, pal.surface);
 
-    // Rounded capsule border in the state accent color.
-    let pen = CreatePen(PS_SOLID, 2, rgb(pal.border));
+    // Hairline edge, following the window region.
+    let pen = CreatePen(PS_SOLID, px(1).max(1), rgb(pal.border));
     let old_pen = SelectObject(hdc, pen);
     let old_brush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
-    let ell = h - 2;
-    RoundRect(hdc, 1, 1, w - 1, h - 1, ell, ell);
+    RoundRect(hdc, 0, 0, w, h, px(RADIUS) * 2, px(RADIUS) * 2);
     SelectObject(hdc, old_pen);
     SelectObject(hdc, old_brush);
     DeleteObject(pen);
 
+    // State rail.
+    let rail_h = px(RAIL_H);
+    fill(hdc, px(PAD), (h - rail_h) / 2, px(RAIL_W), rail_h, pal.accent);
+
     SetBkMode(hdc, 1); // TRANSPARENT
+    let (left, right) = (px(TEXT_X), w - px(PAD));
+    let top = (h - px(TITLE_H + SUB_H)) / 2;
+    draw_line(hdc, &title, (left, top, right, px(TITLE_H)), px(15), 600, pal.title);
+    let sub_top = top + px(TITLE_H);
+    draw_line(hdc, &sub, (left, sub_top, right, px(SUB_H)), px(11), 400, pal.sub);
 
-    let block_top = ((h - 34) / 2).max(2);
+    // Progress hugs the bottom edge, inset past the corner arcs.
+    if progress > 0.0 {
+        let track = w - px(PAD) * 2;
+        let done = (track as f32 * progress.min(1.0)) as i32;
+        fill(hdc, px(PAD), h - px(11), done, px(3), pal.accent);
+    }
 
-    // label
-    let lfont = make_font(-18, 600);
-    let old = SelectObject(hdc, lfont);
-    SetTextColor(hdc, rgb(pal.text));
-    let mut lr = RECT { left: 0, top: block_top, right: w, bottom: block_top + 20 };
-    let wl = sys::wide(&label);
-    DrawTextW(hdc, wl.as_ptr(), -1, &mut lr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    SelectObject(hdc, old);
-    DeleteObject(lfont);
-
-    // sub label
-    let sfont = make_font(-12, 400);
-    let olds = SelectObject(hdc, sfont);
-    SetTextColor(hdc, rgb(pal.sub));
-    let st = block_top + 20;
-    let mut sr = RECT { left: 0, top: st, right: w, bottom: st + 14 };
-    let ws = sys::wide(&subtext);
-    DrawTextW(hdc, ws.as_ptr(), -1, &mut sr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    SelectObject(hdc, olds);
-    DeleteObject(sfont);
-
+    BitBlt(screen, 0, 0, w, h, hdc, 0, 0, SRCCOPY);
+    SelectObject(hdc, old_bmp);
+    DeleteObject(bmp);
+    DeleteDC(hdc);
     EndPaint(hwnd, &ps);
 }
 
@@ -382,6 +475,11 @@ unsafe extern "system" fn wndproc(
             handle_drop(wparam);
             0
         }
+        WM_DPICHANGED => {
+            let dpi = (wparam & 0xFFFF) as u32;
+            apply_dpi(hwnd, dpi, Some(*(lparam as *const RECT)));
+            0
+        }
         WM_APP_STATE => {
             InvalidateRect(hwnd, ptr::null(), 1);
             KillTimer(hwnd, TIMER_REVERT); // a stale revert would blank a new transfer
@@ -399,7 +497,9 @@ unsafe extern "system" fn wndproc(
                 {
                     let mut s = STATE.lock().unwrap();
                     s.kind = StateKind::Idle;
-                    s.detail.clear();
+                    s.title.clear();
+                    s.sub.clear();
+                    s.progress = 0.0;
                 }
                 InvalidateRect(hwnd, ptr::null(), 1);
             }
@@ -457,18 +557,14 @@ unsafe fn create_window() -> HWND {
     };
     RegisterClassExW(&wc);
 
-    let sw = GetSystemMetrics(SM_CXSCREEN);
-    let sh = GetSystemMetrics(SM_CYSCREEN);
-    let x = (sw - PILL_W) / 2;
-    let y = (sh - PILL_H) / 2;
-
+    // Created at 96-dpi size, then resized to the monitor it actually landed on.
     let hwnd = CreateWindowExW(
-        WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_ACCEPTFILES,
+        WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_ACCEPTFILES,
         class_name.as_ptr(),
         sys::wide("CursorDrop").as_ptr(),
         WS_POPUP | WS_VISIBLE,
-        x,
-        y,
+        0,
+        0,
         PILL_W,
         PILL_H,
         ptr::null_mut(),
@@ -477,15 +573,32 @@ unsafe fn create_window() -> HWND {
         ptr::null(),
     );
 
-    // Full capsule: rounded short ends (ellipse = height).
-    let rgn = CreateRoundRectRgn(0, 0, PILL_W + 1, PILL_H + 1, PILL_H, PILL_H);
-    SetWindowRgn(hwnd, rgn, 1);
-
-    SetLayeredWindowAttributes(hwnd, 0, 240, LWA_ALPHA);
-    SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+    apply_dpi(hwnd, GetDpiForWindow(hwnd), None);
     DragAcceptFiles(hwnd, 1);
-
     hwnd
+}
+
+/// Resize, re-centre (first run) and rebuild the rounded region for `dpi`.
+/// Without this the widget is drawn at 96 dpi and stretched by the compositor,
+/// which is what makes the text look soft on a scaled display.
+unsafe fn apply_dpi(hwnd: HWND, dpi: u32, place: Option<RECT>) {
+    DPI.store(if dpi == 0 { 96 } else { dpi as i32 }, Ordering::Relaxed);
+    let (w, h) = (px(PILL_W), px(PILL_H));
+
+    let (x, y, w, h) = match place {
+        Some(r) => (r.left, r.top, r.right - r.left, r.bottom - r.top),
+        None => (
+            (GetSystemMetrics(SM_CXSCREEN) - w) / 2,
+            (GetSystemMetrics(SM_CYSCREEN) - h) / 2,
+            w,
+            h,
+        ),
+    };
+    SetWindowPos(hwnd, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE);
+
+    let rgn = CreateRoundRectRgn(0, 0, w + 1, h + 1, px(RADIUS) * 2, px(RADIUS) * 2);
+    SetWindowRgn(hwnd, rgn, 1); // the window owns the region from here
+    InvalidateRect(hwnd, ptr::null(), 1);
 }
 
 fn main() {
@@ -500,18 +613,21 @@ fn main() {
         std::process::exit(if ok { 0 } else { 1 });
     }
 
-    // Load servers up front so the startup log lists them and the menu is ready.
-    sys::log(&format!(
-        "CursorDrop started ({}x{}), {} server(s)",
-        PILL_W,
-        PILL_H,
-        servers().len()
-    ));
-
     unsafe {
+        // Per-monitor dpi: draw at the display's real pixel density instead of
+        // letting the compositor scale a 96-dpi bitmap up.
+        SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         DARK.store(detect_dark(), Ordering::Relaxed);
         let hwnd = create_window();
         HWND_MAIN.store(hwnd as isize, Ordering::SeqCst);
+
+        // Also loads the servers, so the menu is ready before the first click.
+        sys::log(&format!(
+            "CursorDrop started at {} dpi ({} theme), {} server(s)",
+            DPI.load(Ordering::Relaxed),
+            if DARK.load(Ordering::Relaxed) { "dark" } else { "light" },
+            servers().len()
+        ));
 
         let mut msg: MSG = zeroed();
         while GetMessageW(&mut msg, ptr::null_mut(), 0, 0) > 0 {

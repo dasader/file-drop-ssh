@@ -8,7 +8,7 @@
 #
 # Paste that path straight into a remote Claude Code session running over SSH in
 # Terminus / Termux. Multiple servers are read from CursorDrop.ini exactly like
-# the desktop app ([Server:<name>] sections + the legacy [Remote] section); the
+# the desktop app ([Server:<name>] sections); the
 # "active" one is switchable and remembered between runs.
 #
 # Subcommands:
@@ -45,7 +45,6 @@ DEFAULT_INI='; CursorDrop config — list servers as [Server:<name>] sections.
 ;   RemoteDir = upload target on the remote. '"'"'~'"'"' expands to the remote $HOME;
 ;               an absolute path (starting with '"'"'/'"'"') is used as-is.
 ; The first server listed is the default active one. Switch with `cursor-drop.sh pick`.
-; (The legacy [Remote] section is still recognized.)
 [Server:prod]
 Alias=myserver
 RemoteDir=~/.cursor-drop-files
@@ -103,7 +102,7 @@ ensure_ini() {
 }
 
 # parse_ini: fill SRV_* arrays from $INI. Mirrors config::parse exactly —
-# [Server:<name>] / [Remote] headers start a server; Alias/RemoteDir (case-
+# [Server:<name>] headers start a server; Alias/RemoteDir (case-
 # insensitive keys) apply to the current one; a server is kept only if it has a
 # non-empty Alias; RemoteDir defaults when omitted; unknown sections are ignored.
 parse_ini() {
@@ -131,8 +130,6 @@ parse_ini() {
             if [[ "$section" == Server:* ]]; then
                 trim "${section#Server:}"; cur_name="$REPLY"
                 [ -n "$cur_name" ] && have_cur=1
-            elif [[ "${section,,}" == "remote" ]]; then
-                cur_name="Remote"; have_cur=1
             fi
             continue
         fi
