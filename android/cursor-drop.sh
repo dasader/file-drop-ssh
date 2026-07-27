@@ -13,10 +13,11 @@
 #
 # Subcommands:
 #   cursor-drop.sh <file> [file...]   upload file(s) to the active server (default)
-#   cursor-drop.sh upload <file>...    same, explicit
+#   cursor-drop.sh upload <file>...   same, explicit
 #   cursor-drop.sh list                list servers (marks the active one)
 #   cursor-drop.sh use <name>          set the active server by name
 #   cursor-drop.sh pick                pop a radio dialog to choose the active server
+#   cursor-drop.sh flush               delete every file in the active server's RemoteDir
 #
 # Env:
 #   CURSOR_DROP_INI     override ini path (default ~/.config/cursor-drop/CursorDrop.ini)
@@ -74,6 +75,9 @@ notify() {
 
 die() { notify "CursorDrop: $*"; log "ERROR: $*"; exit 1; }
 
+# trim: strip leading/trailing whitespace into $REPLY (no subshell, like `read`).
+trim() { REPLY="${1#"${1%%[![:space:]]*}"}"; REPLY="${REPLY%"${REPLY##*[![:space:]]}"}"; }
+
 # shell_quote: wrap in double quotes, escaping embedded quotes — for the *remote*
 # portion of ssh commands (mirrors util::shell_quote).
 shell_quote() { printf '"%s"' "${1//\"/\\\"}"; }
@@ -82,7 +86,7 @@ shell_quote() { printf '"%s"' "${1//\"/\\\"}"; }
 # alphanumerics, '.', '_', '-' (mirrors util::sanitize_filename; [:alnum:] keeps
 # Unicode letters under a UTF-8 locale).
 sanitize_filename() {
-    printf '%s' "$1" | sed -E 's/[[:space:]]+/_/g' | sed -E 's/[^[:alnum:]._-]//g'
+    printf '%s' "$1" | sed -E 's/[[:space:]]+/_/g; s/[^[:alnum:]._-]//g'
 }
 
 # ---------------------------------------------------------------------------
@@ -90,6 +94,8 @@ sanitize_filename() {
 # ---------------------------------------------------------------------------
 ensure_ini() {
     mkdir -p "$CONFIG_DIR" "$CACHE_DIR" 2>/dev/null
+    # Nothing else prunes the log and ssh/scp stderr is appended to it.
+    [ -f "$LOG" ] && [ "$(stat -c%s "$LOG" 2>/dev/null || echo 0)" -gt 1000000 ] && : >"$LOG"
     if [ ! -f "$INI" ]; then
         printf '%s' "$DEFAULT_INI" >"$INI" || die "cannot write $INI"
         log "Wrote default CursorDrop.ini"
@@ -115,21 +121,15 @@ parse_ini() {
 
     local line key val section
     while IFS= read -r line || [ -n "$line" ]; do
-        # trim leading/trailing whitespace
-        line="${line#"${line%%[![:space:]]*}"}"
-        line="${line%"${line##*[![:space:]]}"}"
+        trim "$line"; line="$REPLY"
         [ -z "$line" ] && continue
         case "$line" in \#*|';'*) continue ;; esac
 
         if [[ "$line" == \[*\] ]]; then
-            section="${line#[}"; section="${section%]}"
-            section="${section#"${section%%[![:space:]]*}"}"
-            section="${section%"${section##*[![:space:]]}"}"
+            section="${line#[}"; trim "${section%]}"; section="$REPLY"
             flush
             if [[ "$section" == Server:* ]]; then
-                cur_name="${section#Server:}"
-                cur_name="${cur_name#"${cur_name%%[![:space:]]*}"}"
-                cur_name="${cur_name%"${cur_name##*[![:space:]]}"}"
+                trim "${section#Server:}"; cur_name="$REPLY"
                 [ -n "$cur_name" ] && have_cur=1
             elif [[ "${section,,}" == "remote" ]]; then
                 cur_name="Remote"; have_cur=1
@@ -139,9 +139,8 @@ parse_ini() {
 
         [ "$have_cur" = 1 ] || continue
         [[ "$line" == *=* ]] || continue
-        key="${line%%=*}"; val="${line#*=}"
-        key="${key%"${key##*[![:space:]]}"}"; key="${key,,}"
-        val="${val#"${val%%[![:space:]]*}"}"; val="${val%"${val##*[![:space:]]}"}"
+        trim "${line%%=*}"; key="${REPLY,,}"
+        trim "${line#*=}"; val="$REPLY"
         [ -z "$val" ] && continue
         case "$key" in
             alias) cur_alias="$val" ;;
@@ -150,36 +149,34 @@ parse_ini() {
     done <"$INI"
     flush
 
-    # load() guarantees at least one server.
-    if [ "${#SRV_NAMES[@]}" -eq 0 ]; then
-        SRV_NAMES=("prod"); SRV_ALIASES=("myserver"); SRV_DIRS=("$DEFAULT_REMOTE_DIR")
-    fi
+    # Unlike the Rust side there is no synthetic fallback server: an invented
+    # alias would only fail at the first ssh, with a worse message.
+    [ "${#SRV_NAMES[@]}" -eq 0 ] && die "no server with an Alias in $INI"
+}
+
+# Index of the server called $1 on stdout; non-zero exit if there is none.
+index_of() {
+    local i
+    for i in "${!SRV_NAMES[@]}"; do
+        [ "${SRV_NAMES[$i]}" = "$1" ] && { printf '%s' "$i"; return 0; }
+    done
+    return 1
 }
 
 # Index of the active server (defaults to 0 = first). The active NAME is
 # persisted in $ACTIVE_FILE so it survives between shares (the desktop app keeps
 # it session-only, but a phone has no long-running process to hold it).
 active_index() {
-    local want="" i
+    local want=""
     [ -f "$ACTIVE_FILE" ] && want="$(cat "$ACTIVE_FILE" 2>/dev/null)"
-    if [ -n "$want" ]; then
-        for i in "${!SRV_NAMES[@]}"; do
-            [ "${SRV_NAMES[$i]}" = "$want" ] && { printf '%s' "$i"; return; }
-        done
-    fi
+    [ -n "$want" ] && index_of "$want" && return
     printf '0'
 }
 
 set_active() {
-    local name="$1" i
-    for i in "${!SRV_NAMES[@]}"; do
-        if [ "${SRV_NAMES[$i]}" = "$name" ]; then
-            printf '%s' "$name" >"$ACTIVE_FILE"
-            log "Active server -> $name"
-            return 0
-        fi
-    done
-    return 1
+    index_of "$1" >/dev/null || return 1
+    printf '%s' "$1" >"$ACTIVE_FILE"
+    log "Active server -> $1"
 }
 
 # ---------------------------------------------------------------------------
@@ -187,7 +184,7 @@ set_active() {
 # ---------------------------------------------------------------------------
 remote_home() {
     local alias="$1" cache="$CACHE_DIR/home-$1" home
-    if [ -f "$cache" ]; then cat "$cache"; return 0; fi
+    if [ -s "$cache" ]; then cat "$cache"; return 0; fi
     home="$(ssh "${SSH_OPTS[@]}" "$alias" 'echo $HOME' </dev/null 2>>"$LOG")"
     home="${home//$'\n'/}"; home="${home//$'\r'/}"
     [ -z "$home" ] && { log "remote_home failed for $alias"; return 1; }
@@ -208,7 +205,8 @@ resolve_remote_dir() {
 }
 
 # ---------------------------------------------------------------------------
-# Upload (mirrors upload::run)
+# Upload (mirrors upload::run; clipboard failure is non-fatal here — Termux:API
+# may not be installed — whereas the Rust side aborts the upload)
 # ---------------------------------------------------------------------------
 do_upload() {
     local idx="$1"; shift
@@ -272,6 +270,39 @@ do_upload() {
 }
 
 # ---------------------------------------------------------------------------
+# Flush (mirrors upload::flush) — wipe the server's remote dir, top level only
+# ---------------------------------------------------------------------------
+cmd_flush() {
+    local idx="$1"
+    local name="${SRV_NAMES[$idx]}" alias="${SRV_ALIASES[$idx]}" dir="${SRV_DIRS[$idx]}"
+
+    local remote_dir home out
+    remote_dir="$(resolve_remote_dir "$alias" "$dir")" || die "Remote unreachable ($alias)"
+    home="$(remote_home "$alias" 2>/dev/null)"
+    # Never let a stray config turn this into `rm -f /*` or wipe $HOME.
+    if [ "${#remote_dir}" -lt 2 ] || [ "$remote_dir" = "$home" ]; then
+        die "Unsafe RemoteDir: $remote_dir"
+    fi
+
+    # Deleting is not undoable — confirm when a dialog is available (a bare CLI
+    # run has no share-sheet misfire to guard against).
+    if command -v termux-dialog >/dev/null 2>&1; then
+        out="$(termux-dialog confirm -t "CursorDrop" \
+            -i "Delete all files in $alias:$remote_dir?" 2>/dev/null)"
+        case "$out" in *'"yes"'*) ;; *) notify "Flush cancelled"; return ;; esac
+    fi
+
+    # Quotes cover the dir; the glob stays outside so the remote shell expands it.
+    if ssh "${SSH_OPTS[@]}" "$alias" "rm -f $(shell_quote "$remote_dir")/*" \
+        </dev/null >>"$LOG" 2>&1; then
+        notify "CursorDrop: flushed $name"
+        log "Flushed $alias:$remote_dir"
+    else
+        die "Flush failed ($alias)"
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # Server selection UI
 # ---------------------------------------------------------------------------
 cmd_list() {
@@ -287,16 +318,12 @@ cmd_list() {
 # nothing if cancelled / no dialog available.
 pick_dialog() {
     command -v termux-dialog >/dev/null 2>&1 || return 1
-    local values out chosen i
+    local values out chosen
     values="$(IFS=,; printf '%s' "${SRV_NAMES[*]}")"
     out="$(termux-dialog radio -t "CursorDrop: target server" -v "$values" 2>/dev/null)"
     # termux-dialog returns JSON: {"code":..,"text":"name","index":N}
     chosen="$(printf '%s' "$out" | sed -n 's/.*"text"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
-    [ -z "$chosen" ] && return 1
-    for i in "${!SRV_NAMES[@]}"; do
-        [ "${SRV_NAMES[$i]}" = "$chosen" ] && { printf '%s' "$i"; return 0; }
-    done
-    return 1
+    [ -n "$chosen" ] && index_of "$chosen"
 }
 
 cmd_pick() {
@@ -320,12 +347,12 @@ cmd="${1:-}"
 case "$cmd" in
     list)   cmd_list; exit 0 ;;
     pick)   cmd_pick; exit 0 ;;
+    flush)  cmd_flush "$(active_index)"; exit 0 ;;
     use)
         [ -n "${2:-}" ] || die "usage: cursor-drop.sh use <name>"
         set_active "$2" && notify "Active server -> $2" || die "no such server: $2"
         exit 0 ;;
     upload) shift ;;        # explicit upload; fall through with remaining args
-    "" )    die "no files given" ;;
     *)      ;;              # default: treat all args as files
 esac
 

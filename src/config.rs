@@ -12,8 +12,6 @@ pub struct Server {
     pub remote_dir: String,
 }
 
-const DEFAULT_NAME: &str = "prod";
-const DEFAULT_ALIAS: &str = "myserver";
 const DEFAULT_REMOTE_DIR: &str = "~/.cursor-drop-files";
 
 const DEFAULT_INI: &str = "\
@@ -46,9 +44,11 @@ pub fn load() -> Vec<Server> {
         }
     };
 
+    // A garbage ini falls back to what the default one would have produced
+    // (`default_ini_has_one_server` keeps that non-empty).
     let mut servers = parse(&text);
     if servers.is_empty() {
-        servers.push(default_server());
+        servers = parse(DEFAULT_INI);
     }
 
     for s in &servers {
@@ -58,14 +58,6 @@ pub fn load() -> Vec<Server> {
         ));
     }
     servers
-}
-
-fn default_server() -> Server {
-    Server {
-        name: DEFAULT_NAME.to_string(),
-        alias: DEFAULT_ALIAS.to_string(),
-        remote_dir: DEFAULT_REMOTE_DIR.to_string(),
-    }
 }
 
 /// Parse INI text into a list of servers. Pure (no I/O) so it is unit-testable.
@@ -180,6 +172,16 @@ RemoteDir=~/.cursor-drop-files
     fn server_without_alias_is_dropped() {
         let s = parse("[Server:x]\nRemoteDir=~/foo\n");
         assert!(s.is_empty());
+    }
+
+    /// `load()` relies on this: a garbage ini falls back to `parse(DEFAULT_INI)`,
+    /// and callers index `servers()[0]`.
+    #[test]
+    fn default_ini_has_one_server() {
+        let s = parse(DEFAULT_INI);
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].name, "prod");
+        assert_eq!(s[0].remote_dir, DEFAULT_REMOTE_DIR);
     }
 
     #[test]

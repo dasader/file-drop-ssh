@@ -38,10 +38,17 @@ fn exe_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-/// `<exe dir>\CursorDrop.log`
+/// `<exe dir>\CursorDrop.log`, restarted once per run if it grew past ~1 MB
+/// (nothing else ever prunes it and every upload writes several lines).
 pub fn log_path() -> &'static PathBuf {
     static P: OnceLock<PathBuf> = OnceLock::new();
-    P.get_or_init(|| exe_dir().join("CursorDrop.log"))
+    P.get_or_init(|| {
+        let p = exe_dir().join("CursorDrop.log");
+        if std::fs::metadata(&p).map(|m| m.len() > 1_000_000).unwrap_or(false) {
+            let _ = std::fs::remove_file(&p);
+        }
+        p
+    })
 }
 
 /// `<exe dir>\CursorDrop.ini`
@@ -56,6 +63,16 @@ pub fn clip_dir() -> &'static PathBuf {
     P.get_or_init(|| {
         let d = std::env::temp_dir().join("CursorDrop_clips");
         let _ = std::fs::create_dir_all(&d);
+        // Every pasted image lands here and nothing else prunes it; a
+        // screenshot is megabytes, so drop day-old ones once per run.
+        if let Ok(entries) = std::fs::read_dir(&d) {
+            for e in entries.flatten() {
+                let age = e.metadata().ok().and_then(|m| m.modified().ok()).and_then(|t| t.elapsed().ok());
+                if age.is_some_and(|a| a.as_secs() > 24 * 60 * 60) {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
+        }
         d
     })
 }

@@ -71,9 +71,11 @@ The active server defaults to the **first** one in the ini and is remembered in
 `~/.config/cursor-drop/active`.
 
 ```bash
+cursor-drop.sh upload a.png # explicit upload (same as the default)
 cursor-drop.sh list        # list servers, '*' marks the active one
 cursor-drop.sh pick        # radio dialog to choose the active server
 cursor-drop.sh use dev     # set active by name
+cursor-drop.sh flush       # delete every file in the active server's RemoteDir
 ```
 
 Want to be asked **on every share** which server to target (a one-shot choice
@@ -102,7 +104,10 @@ cursor-drop.sh file1.png file2.png                 # multiple files
   path so it pastes as a literal absolute path.
 - **Multi-server**: `[Server:<name>]` sections + the legacy `[Remote]` section;
   a server with no `Alias` is dropped; `RemoteDir` defaults to
-  `~/.cursor-drop-files` when omitted; there is always at least one server.
+  `~/.cursor-drop-files` when omitted.
+- **Divergence**: when the ini yields no usable server the desktop app falls back
+  to a synthetic default; here it exits with `no server with an Alias in <ini>`,
+  since a made-up alias would only fail at the first `ssh`.
 
 ## Notes / limits
 
