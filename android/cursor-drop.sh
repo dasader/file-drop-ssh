@@ -17,6 +17,7 @@
 #   cursor-drop.sh list                list servers (marks the active one)
 #   cursor-drop.sh use <name>          set the active server by name
 #   cursor-drop.sh pick                pop a radio dialog to choose the active server
+#   cursor-drop.sh flush               delete every file in the active server's RemoteDir
 #
 # Env:
 #   CURSOR_DROP_INI     override ini path (default ~/.config/cursor-drop/CursorDrop.ini)
@@ -272,6 +273,39 @@ do_upload() {
 }
 
 # ---------------------------------------------------------------------------
+# Flush (mirrors upload::flush) — wipe the server's remote dir, top level only
+# ---------------------------------------------------------------------------
+cmd_flush() {
+    local idx="$1"
+    local name="${SRV_NAMES[$idx]}" alias="${SRV_ALIASES[$idx]}" dir="${SRV_DIRS[$idx]}"
+
+    local remote_dir home out
+    remote_dir="$(resolve_remote_dir "$alias" "$dir")" || die "Remote unreachable ($alias)"
+    home="$(remote_home "$alias" 2>/dev/null)"
+    # Never let a stray config turn this into `rm -f /*` or wipe $HOME.
+    if [ "${#remote_dir}" -lt 2 ] || [ "$remote_dir" = "$home" ]; then
+        die "Unsafe RemoteDir: $remote_dir"
+    fi
+
+    # Deleting is not undoable — confirm when a dialog is available (a bare CLI
+    # run has no share-sheet misfire to guard against).
+    if command -v termux-dialog >/dev/null 2>&1; then
+        out="$(termux-dialog confirm -t "CursorDrop" \
+            -i "Delete all files in $alias:$remote_dir?" 2>/dev/null)"
+        case "$out" in *'"yes"'*) ;; *) notify "Flush cancelled"; return ;; esac
+    fi
+
+    # Quotes cover the dir; the glob stays outside so the remote shell expands it.
+    if ssh "${SSH_OPTS[@]}" "$alias" "rm -f $(shell_quote "$remote_dir")/*" \
+        </dev/null >>"$LOG" 2>&1; then
+        notify "CursorDrop: flushed $name"
+        log "Flushed $alias:$remote_dir"
+    else
+        die "Flush failed ($alias)"
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # Server selection UI
 # ---------------------------------------------------------------------------
 cmd_list() {
@@ -320,6 +354,7 @@ cmd="${1:-}"
 case "$cmd" in
     list)   cmd_list; exit 0 ;;
     pick)   cmd_pick; exit 0 ;;
+    flush)  cmd_flush "$(active_index)"; exit 0 ;;
     use)
         [ -n "${2:-}" ] || die "usage: cursor-drop.sh use <name>"
         set_active "$2" && notify "Active server -> $2" || die "no such server: $2"

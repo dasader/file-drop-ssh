@@ -61,27 +61,24 @@ pub fn clipboard_has_bitmap() -> bool {
 }
 
 /// Put UTF-16 text on the clipboard. On success the OS owns the memory.
-pub fn set_clipboard_text(s: &str) -> bool {
+pub fn set_clipboard_text(s: &str) {
     let w: Vec<u16> = s.encode_utf16().chain(std::iter::once(0)).collect();
     let bytes = w.len() * 2;
     unsafe {
         if OpenClipboard(ptr::null_mut()) == 0 {
-            return false;
+            return;
         }
         EmptyClipboard();
         let hmem = GlobalAlloc(GMEM_MOVEABLE, bytes);
-        if hmem.is_null() {
-            CloseClipboard();
-            return false;
+        if !hmem.is_null() {
+            let dst = GlobalLock(hmem) as *mut u16;
+            if !dst.is_null() {
+                ptr::copy_nonoverlapping(w.as_ptr(), dst, w.len());
+                GlobalUnlock(hmem);
+            }
+            SetClipboardData(CF_UNICODETEXT, hmem);
         }
-        let dst = GlobalLock(hmem) as *mut u16;
-        if !dst.is_null() {
-            ptr::copy_nonoverlapping(w.as_ptr(), dst, w.len());
-            GlobalUnlock(hmem);
-        }
-        let ok = !SetClipboardData(CF_UNICODETEXT, hmem).is_null();
         CloseClipboard();
-        ok
     }
 }
 

@@ -27,7 +27,7 @@ AutoHotkey v2 스크립트(`CursorDrop v4`)를 **Rust + windows-sys**로 포팅�
 - **Ctrl+V** (위젯 포커스 상태) → 클립보드 파일 / 비트맵 이미지(PNG 변환) 업로드
 - 원격 `$HOME` 1회 조회로 `~` → 절대경로 변환 (캐시)
 - 백그라운드 스레드에서 `mkdir -p` + `touch` + `scp` (모두 `BatchMode=yes`)
-- 트레이/우클릭 메뉴 (서버 선택 / Paste / Show log / Exit)
+- 우클릭 메뉴 (서버 선택 / Paste / Flush remote files / Show log / Exit)
 - **다중 서버**: ini에 여러 서버를 정의하고 우클릭 메뉴에서 활성 서버 전환
 - 상태 색상 피드백 (idle / reading / uploading / success / error)
 - **CLI 모드**: `CursorDrop.exe <파일> [...]` → GUI 없이 업로드 후 종료
@@ -69,14 +69,14 @@ RemoteDir=~/uploads
 
 ## 사용
 
-1. `CursorDrop.exe` 더블클릭 → 화면 중앙 알약 + 트레이 아이콘.
+1. `CursorDrop.exe` 더블클릭 → 화면 중앙 알약.
 2. (서버가 여럿이면) 위젯 **우클릭 → 서버 선택**으로 활성 서버를 고른다.
 3. 파일을 위젯에 **드래그**하거나, 이미지 복사 후 위젯 클릭→**Ctrl+V**
    (또는 위젯 우클릭 → "Paste clipboard").
 4. 업로드되고 원격 절대경로가 **클립보드**에 들어간다.
 5. WezTerm(원격 Claude Code)에서 **`Ctrl+Shift+V`** 로 붙여 넣으면 끝.
 
-- 위젯 클릭 드래그로 이동, `Esc` 종료, 트레이/우클릭 메뉴.
+- 위젯 클릭 드래그로 이동, `Esc` 종료, 우클릭 메뉴.
 - 로그: exe 옆 `CursorDrop.log`.
 
 ### 사전 요구
@@ -96,7 +96,7 @@ RemoteDir=~/uploads
 | `src/config.rs` | `CursorDrop.ini` 로드/기본생성 + 다중 서버 파서(단위 테스트) |
 | `src/clipboard.rs` | 클립보드 파일/비트맵(GDI+ PNG) + 텍스트 설정 |
 | `src/upload.rs` | 원격 `$HOME` 해석 + 경로계산 + 클립보드 + scp(워커 스레드) |
-| `src/main.rs` | 윈도/WndProc/트레이/상태머신/입력/CLI |
+| `src/main.rs` | 윈도/WndProc/우클릭 메뉴/상태머신/입력/CLI |
 
 테스트: `cargo test`.
 
@@ -144,6 +144,7 @@ cp android/CursorDrop.ini ~/.config/cursor-drop/CursorDrop.ini   # Alias/RemoteD
 cursor-drop.sh list        # 서버 목록, '*' 가 활성
 cursor-drop.sh pick        # 라디오 다이얼로그로 선택
 cursor-drop.sh use dev     # 이름으로 활성 지정
+cursor-drop.sh flush       # 활성 서버 RemoteDir 안의 파일 전부 삭제
 ```
 
 매 공유마다 대상 서버를 묻고 싶으면(저장된 활성은 안 바뀜) `CURSOR_DROP_PROMPT=1`

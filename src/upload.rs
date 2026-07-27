@@ -110,6 +110,33 @@ pub fn run(files: Vec<PathBuf>, server: &Server) -> bool {
     }
 }
 
+/// Delete every file sitting in the server's remote dir (top level only, no
+/// recursion). Runs on a worker thread; the caller confirms with the user first.
+pub fn flush(server: Server) {
+    crate::set_state(StateKind::Uploading, "Flushing...");
+    std::thread::spawn(move || {
+        let dir = match resolve_remote_dir(&server.alias, &server.remote_dir) {
+            Some(d) => d,
+            None => {
+                crate::set_state(StateKind::Error, "Remote unreachable");
+                return;
+            }
+        };
+        // Never let a stray config turn this into `rm -f /*` or wipe $HOME.
+        if dir.len() < 2 || Some(&dir) == remote_home(&server.alias).as_ref() {
+            log(&format!("Flush refused for unsafe remote dir: {}", dir));
+            crate::set_state(StateKind::Error, "Unsafe RemoteDir");
+            return;
+        }
+        // Quotes cover the dir; the glob stays outside so the remote shell expands it.
+        if run_ssh(&server.alias, &format!("rm -f {}/*", shell_quote(&dir))) {
+            crate::set_state(StateKind::Success, "Remote flushed");
+        } else {
+            crate::set_state(StateKind::Error, "Flush failed");
+        }
+    });
+}
+
 /// Turn the configured remote dir into an absolute path on the remote,
 /// expanding a leading `~` via the remote `$HOME` (queried once, cached).
 fn resolve_remote_dir(alias: &str, dir: &str) -> Option<String> {

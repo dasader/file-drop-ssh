@@ -74,6 +74,7 @@ The active server defaults to the **first** one in the ini and is remembered in
 cursor-drop.sh list        # list servers, '*' marks the active one
 cursor-drop.sh pick        # radio dialog to choose the active server
 cursor-drop.sh use dev     # set active by name
+cursor-drop.sh flush       # delete every file in the active server's RemoteDir
 ```
 
 Want to be asked **on every share** which server to target (a one-shot choice

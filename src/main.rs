@@ -33,19 +33,17 @@ use windows_sys::Win32::System::Registry::{
     RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, ReleaseCapture};
-use windows_sys::Win32::UI::Shell::{
-    DragAcceptFiles, DragFinish, DragQueryFileW, ExtractIconW, Shell_NotifyIconW, HDROP,
-    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
-};
+use windows_sys::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
     GetClientRect, GetCursorPos, GetSystemMetrics, KillTimer, LoadCursorW,
     PostMessageW, PostQuitMessage, RegisterClassExW, SendMessageW,
     SetForegroundWindow, SetLayeredWindowAttributes, SetTimer, SetWindowPos, TrackPopupMenu,
     CS_HREDRAW, CS_VREDRAW, GetMessageW, DispatchMessageW, TranslateMessage, HWND_TOPMOST,
-    IDC_ARROW, LWA_ALPHA, MF_CHECKED, MF_SEPARATOR, MF_STRING, MSG, SM_CXSCREEN, SM_CYSCREEN, SWP_NOMOVE,
-    SWP_NOSIZE, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP, WM_CONTEXTMENU, WM_DESTROY, WM_DROPFILES,
-    WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_NCLBUTTONDOWN, WM_PAINT,
+    MessageBoxW, IDC_ARROW, IDYES, LWA_ALPHA, MB_ICONWARNING, MB_YESNO, MF_CHECKED, MF_SEPARATOR,
+    MF_STRING, MSG, SM_CXSCREEN, SM_CYSCREEN, SWP_NOMOVE,
+    SWP_NOSIZE, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP, WM_DESTROY, WM_DROPFILES,
+    WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_NCLBUTTONDOWN, WM_PAINT,
     WM_RBUTTONUP, WM_TIMER, WNDCLASSEXW, WS_EX_ACCEPTFILES, WS_EX_LAYERED, WS_EX_TOOLWINDOW,
     WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE, HTCAPTION,
 };
@@ -54,12 +52,12 @@ const PILL_W: i32 = 160;
 const PILL_H: i32 = 52;
 
 const WM_APP_STATE: u32 = WM_APP + 1;
-const WM_APP_TRAY: u32 = WM_APP + 2;
 const TIMER_REVERT: usize = 1;
 
 const ID_PASTE: usize = 101;
 const ID_LOG: usize = 102;
 const ID_EXIT: usize = 103;
+const ID_FLUSH: usize = 104;
 /// Server menu items get command IDs `ID_SERVER_BASE + index`.
 const ID_SERVER_BASE: usize = 200;
 
@@ -151,12 +149,6 @@ fn rgb(r: u8, g: u8, b: u8) -> u32 {
 
 type Rgb = (u8, u8, u8);
 
-/// Lighten (+) or darken (-) each channel, clamped.
-fn shade(c: Rgb, d: i32) -> Rgb {
-    let f = |v: u8| (v as i32 + d).clamp(0, 255) as u8;
-    (f(c.0), f(c.1), f(c.2))
-}
-
 struct Pal {
     bg: Rgb,
     text: Rgb,
@@ -192,21 +184,13 @@ fn current_visual() -> (Pal, String, String) {
     };
     let dark = DARK.load(Ordering::Relaxed);
     let pal = palette(kind, dark);
+    // Uploading/Success/Error always carry a detail string from set_state().
     let (label, subtext) = match kind {
         StateKind::Idle => ("Drop / Paste".to_string(), "Ctrl+V or drag files".to_string()),
         StateKind::Reading => ("Reading...".to_string(), "Checking clipboard".to_string()),
-        StateKind::Uploading => (
-            if detail.is_empty() { "Uploading...".to_string() } else { detail },
-            "Syncing to remote".to_string(),
-        ),
-        StateKind::Success => (
-            if detail.is_empty() { "Done".to_string() } else { detail },
-            "Ctrl+Shift+V to paste".to_string(),
-        ),
-        StateKind::Error => (
-            if detail.is_empty() { "Error".to_string() } else { detail },
-            "Check log".to_string(),
-        ),
+        StateKind::Uploading => (detail, "Syncing to remote".to_string()),
+        StateKind::Success => (detail, "Ctrl+Shift+V to paste".to_string()),
+        StateKind::Error => (detail, "Check log".to_string()),
     };
     (pal, label, subtext)
 }
@@ -229,19 +213,9 @@ unsafe fn paint(hwnd: HWND) {
     let (pal, label, subtext) = current_visual();
     let w = rc.right;
 
-    // Subtle vertical gradient (lighter top -> darker bottom) for depth.
-    let top = shade(pal.bg, 14);
-    let bot = shade(pal.bg, -10);
-    let lerp = |a: u8, b: u8, t: f32| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
-    let denom = if h > 1 { (h - 1) as f32 } else { 1.0 };
-    for y in 0..h {
-        let t = y as f32 / denom;
-        let col = rgb(lerp(top.0, bot.0, t), lerp(top.1, bot.1, t), lerp(top.2, bot.2, t));
-        let brush = CreateSolidBrush(col);
-        let row = RECT { left: 0, top: y, right: w, bottom: y + 1 };
-        FillRect(hdc, &row, brush);
-        DeleteObject(brush);
-    }
+    let brush = CreateSolidBrush(rgb(pal.bg.0, pal.bg.1, pal.bg.2));
+    FillRect(hdc, &rc, brush);
+    DeleteObject(brush);
 
     // Rounded capsule border in the state accent color.
     let pen = CreatePen(PS_SOLID, 2, rgb(pal.border.0, pal.border.1, pal.border.2));
@@ -284,32 +258,8 @@ unsafe fn paint(hwnd: HWND) {
 }
 
 // ---------------------------------------------------------------------------
-// Tray + menu
+// Menu
 // ---------------------------------------------------------------------------
-unsafe fn add_tray(hwnd: HWND) {
-    let hinst = GetModuleHandleW(ptr::null());
-    let mut nid: NOTIFYICONDATAW = zeroed();
-    nid.cbSize = size_of::<NOTIFYICONDATAW>() as u32;
-    nid.hWnd = hwnd;
-    nid.uID = 1;
-    nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
-    nid.uCallbackMessage = WM_APP_TRAY;
-    nid.hIcon = ExtractIconW(hinst, sys::wide("shell32.dll").as_ptr(), 46);
-    let tip = sys::wide("CursorDrop");
-    for (i, c) in tip.iter().enumerate().take(nid.szTip.len()) {
-        nid.szTip[i] = *c;
-    }
-    Shell_NotifyIconW(NIM_ADD, &mut nid);
-}
-
-unsafe fn remove_tray(hwnd: HWND) {
-    let mut nid: NOTIFYICONDATAW = zeroed();
-    nid.cbSize = size_of::<NOTIFYICONDATAW>() as u32;
-    nid.hWnd = hwnd;
-    nid.uID = 1;
-    Shell_NotifyIconW(NIM_DELETE, &mut nid);
-}
-
 unsafe fn show_menu(hwnd: HWND) {
     let menu = CreatePopupMenu();
 
@@ -327,6 +277,7 @@ unsafe fn show_menu(hwnd: HWND) {
     }
 
     AppendMenuW(menu, MF_STRING, ID_PASTE, sys::wide("Paste clipboard").as_ptr());
+    AppendMenuW(menu, MF_STRING, ID_FLUSH, sys::wide("Flush remote files").as_ptr());
     AppendMenuW(menu, MF_SEPARATOR, 0, ptr::null());
     AppendMenuW(menu, MF_STRING, ID_LOG, sys::wide("Show log").as_ptr());
     AppendMenuW(menu, MF_SEPARATOR, 0, ptr::null());
@@ -355,6 +306,24 @@ unsafe fn show_menu(hwnd: HWND) {
     }
     match cmd {
         ID_PASTE => do_paste(),
+        ID_FLUSH => {
+            // Deleting remote files is not undoable — always confirm.
+            let s = active_server();
+            let text = sys::wide(&format!(
+                "Delete all files in {}:{} ?\n\nThis cannot be undone.",
+                s.alias, s.remote_dir
+            ));
+            let title = sys::wide("CursorDrop — flush remote files");
+            let answer = MessageBoxW(
+                hwnd,
+                text.as_ptr(),
+                title.as_ptr(),
+                MB_YESNO | MB_ICONWARNING,
+            );
+            if answer == IDYES {
+                upload::flush(s);
+            }
+        }
         ID_LOG => {
             let _ = std::process::Command::new("notepad")
                 .arg(sys::log_path())
@@ -385,7 +354,6 @@ unsafe fn handle_drop(wparam: WPARAM) {
     if files.is_empty() {
         return;
     }
-    set_state(StateKind::Reading, "");
     upload::handle_files(files, active_server());
 }
 
@@ -448,17 +416,7 @@ unsafe extern "system" fn wndproc(
             }
             0
         }
-        WM_APP_TRAY => {
-            let m = lparam as u32;
-            if m == WM_RBUTTONUP || m == WM_CONTEXTMENU {
-                show_menu(hwnd);
-            } else if m == WM_LBUTTONDBLCLK {
-                do_paste();
-            }
-            0
-        }
         WM_DESTROY => {
-            remove_tray(hwnd);
             PostQuitMessage(0);
             0
         }
@@ -567,7 +525,6 @@ fn main() {
         DARK.store(detect_dark(), Ordering::Relaxed);
         let hwnd = create_window();
         HWND_MAIN.store(hwnd as isize, Ordering::SeqCst);
-        add_tray(hwnd);
 
         let mut msg: MSG = zeroed();
         while GetMessageW(&mut msg, ptr::null_mut(), 0, 0) > 0 {

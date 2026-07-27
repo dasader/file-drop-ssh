@@ -53,7 +53,7 @@ Module responsibilities:
 
 | File | Role |
 |------|------|
-| `src/main.rs` | Win32 window/WndProc, tray + right-click menu, state machine, input, CLI mode |
+| `src/main.rs` | Win32 window/WndProc, right-click menu, state machine, input, CLI mode |
 | `src/config.rs` | `CursorDrop.ini` parse/default-create → `Vec<Server>` |
 | `src/upload.rs` | remote `$HOME` resolve + path calc + clipboard + `ssh`/`scp` (worker thread) |
 | `src/clipboard.rs` | clipboard file list / bitmap (GDI+ → PNG) + set text |
@@ -85,7 +85,7 @@ parsing) — those parity points are listed in `android/README.md`.
 
 Differs from the desktop app in how the active server is handled: it **is**
 persisted (to `~/.config/cursor-drop/active`), unlike the Rust app's session-only
-`ACTIVE`. Subcommands: `list` / `pick` / `use <name>`; `CURSOR_DROP_PROMPT=1`
+`ACTIVE`. Subcommands: `list` / `pick` / `use <name>` / `flush`; `CURSOR_DROP_PROMPT=1`
 asks per-share without changing the saved active. No native build/test — it's a
 script; test by running `cursor-drop.sh <file>` under Termux (needs `openssh` +
 `termux-api`).
