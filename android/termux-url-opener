@@ -10,15 +10,14 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 drop() {
     if [ -x "$DIR/cursor-drop.sh" ]; then "$DIR/cursor-drop.sh" "$@"; else cursor-drop.sh "$@"; fi
 }
+toast() { command -v termux-toast >/dev/null 2>&1 && termux-toast "$*"; }
 
 read -r value
 
 case "$value" in
     /*|file://*)
         path="${value#file://}"
-        if [ -f "$path" ]; then drop "$path"; else
-            command -v termux-toast >/dev/null 2>&1 && termux-toast "CursorDrop: not a file: $path"
-        fi
+        if [ -f "$path" ]; then drop "$path"; else toast "CursorDrop: not a file: $path"; fi
         ;;
     content://*)
         # Stage the content URI to a temp file, then upload that.
@@ -28,14 +27,11 @@ case "$value" in
             termux-storage-get "$tmp" "$value" 2>/dev/null
             if [ -s "$tmp" ]; then drop "$tmp"; rm -f "$tmp"; else
                 rm -f "$tmp"
-                command -v termux-toast >/dev/null 2>&1 && termux-toast "CursorDrop: could not read shared content"
+                toast "CursorDrop: could not read shared content"
             fi
         else
-            command -v termux-toast >/dev/null 2>&1 && termux-toast "CursorDrop: install Termux:API to share files"
+            toast "CursorDrop: install Termux:API to share files"
         fi
         ;;
-    *)
-        command -v termux-toast >/dev/null 2>&1 && \
-            termux-toast "CursorDrop only handles files, not URLs/text"
-        ;;
+    *)  toast "CursorDrop only handles files, not URLs/text" ;;
 esac

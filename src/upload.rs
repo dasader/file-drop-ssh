@@ -1,11 +1,12 @@
-//! Terminal mode: read the SSH alias + remote dir from config, resolve the
-//! remote absolute path, copy the remote paths to the clipboard, and sync the
-//! files over scp on a background thread. No editor window / auto-paste.
+//! Read the SSH alias + remote dir from config, resolve the remote absolute
+//! path, copy the remote paths to the clipboard, and sync the files over scp
+//! on a background thread.
 
 use std::collections::HashMap;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use crate::clipboard::set_clipboard_text;
@@ -17,14 +18,38 @@ use crate::StateKind;
 const SSH_TIMEOUT: u32 = 30;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+/// `ssh`/`scp` with the options every call needs: no console window, no stdin
+/// (BatchMode means a passphrase prompt would hang us), bounded connect time.
+fn ssh_cmd(prog: &str) -> Command {
+    let mut c = Command::new(prog);
+    c.arg("-o")
+        .arg(format!("ConnectTimeout={}", SSH_TIMEOUT))
+        .arg("-o")
+        .arg("BatchMode=yes")
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(Stdio::null());
+    c
+}
+
 /// Entry point for drag-drop and clipboard paste (GUI). Runs on a worker thread
 /// so the UI thread never blocks on ssh. `server` is the currently active one.
 pub fn handle_files(files: Vec<PathBuf>, server: Server) {
+    // One transfer at a time — two workers would overwrite each other's
+    // clipboard payload and leave the user holding the wrong paths.
+    if BUSY.swap(true, Ordering::SeqCst) {
+        // Log only: the pill is showing the running transfer, and touching it
+        // here would arm the revert timer and blank that transfer mid-flight.
+        log("Busy — a transfer is already running");
+        return;
+    }
     crate::set_state(StateKind::Uploading, "Preparing...");
     std::thread::spawn(move || {
         run(files, &server);
+        BUSY.store(false, Ordering::SeqCst);
     });
 }
+
+static BUSY: AtomicBool = AtomicBool::new(false);
 
 /// Resolve remote dir, copy remote paths to the clipboard, mkdir+touch, scp.
 /// Synchronous; returns true on full success. Also used by CLI mode.
@@ -65,7 +90,12 @@ pub fn run(files: Vec<PathBuf>, server: &Server) -> bool {
         .map(|p| format!("'{}'", p))
         .collect::<Vec<_>>()
         .join(" ");
-    set_clipboard_text(&payload);
+    // The path on the clipboard IS the deliverable — no point uploading without it.
+    if !set_clipboard_text(&payload) {
+        crate::set_state(StateKind::Error, "Clipboard failed");
+        log("Clipboard set failed");
+        return false;
+    }
     log(&format!("Clipboard set: {}", payload));
 
     let total = remote_files.len();
@@ -84,10 +114,7 @@ pub fn run(files: Vec<PathBuf>, server: &Server) -> bool {
 
     let mut fails = 0;
     for (i, (local, remote)) in files.iter().zip(remote_files.iter()).enumerate() {
-        let fname = local
-            .file_name()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let fname = local.file_name().unwrap_or_default().to_string_lossy();
         crate::set_state(
             StateKind::Uploading,
             &format!("Syncing {}/{} {}", i + 1, total, fname),
@@ -113,28 +140,40 @@ pub fn run(files: Vec<PathBuf>, server: &Server) -> bool {
 /// Delete every file sitting in the server's remote dir (top level only, no
 /// recursion). Runs on a worker thread; the caller confirms with the user first.
 pub fn flush(server: Server) {
+    // Shares the upload gate: flushing mid-upload would delete what is arriving.
+    if BUSY.swap(true, Ordering::SeqCst) {
+        // Log only: the pill is showing the running transfer, and touching it
+        // here would arm the revert timer and blank that transfer mid-flight.
+        log("Busy — a transfer is already running");
+        return;
+    }
     crate::set_state(StateKind::Uploading, "Flushing...");
     std::thread::spawn(move || {
-        let dir = match resolve_remote_dir(&server.alias, &server.remote_dir) {
-            Some(d) => d,
-            None => {
-                crate::set_state(StateKind::Error, "Remote unreachable");
-                return;
-            }
-        };
-        // Never let a stray config turn this into `rm -f /*` or wipe $HOME.
-        if dir.len() < 2 || Some(&dir) == remote_home(&server.alias).as_ref() {
-            log(&format!("Flush refused for unsafe remote dir: {}", dir));
-            crate::set_state(StateKind::Error, "Unsafe RemoteDir");
+        run_flush(&server);
+        BUSY.store(false, Ordering::SeqCst);
+    });
+}
+
+fn run_flush(server: &Server) {
+    let dir = match resolve_remote_dir(&server.alias, &server.remote_dir) {
+        Some(d) => d,
+        None => {
+            crate::set_state(StateKind::Error, "Remote unreachable");
             return;
         }
-        // Quotes cover the dir; the glob stays outside so the remote shell expands it.
-        if run_ssh(&server.alias, &format!("rm -f {}/*", shell_quote(&dir))) {
-            crate::set_state(StateKind::Success, "Remote flushed");
-        } else {
-            crate::set_state(StateKind::Error, "Flush failed");
-        }
-    });
+    };
+    // Never let a stray config turn this into `rm -f /*` or wipe $HOME.
+    if dir.len() < 2 || Some(&dir) == remote_home(&server.alias).as_ref() {
+        log(&format!("Flush refused for unsafe remote dir: {}", dir));
+        crate::set_state(StateKind::Error, "Unsafe RemoteDir");
+        return;
+    }
+    // Quotes cover the dir; the glob stays outside so the remote shell expands it.
+    if run_ssh(&server.alias, &format!("rm -f {}/*", shell_quote(&dir))) {
+        crate::set_state(StateKind::Success, "Remote flushed");
+    } else {
+        crate::set_state(StateKind::Error, "Flush failed");
+    }
 }
 
 /// Turn the configured remote dir into an absolute path on the remote,
@@ -159,17 +198,7 @@ fn remote_home(alias: &str) -> Option<String> {
     if let Some(h) = cache.lock().unwrap().get(alias) {
         return Some(h.clone());
     }
-    let out = Command::new("ssh")
-        .arg("-o")
-        .arg(format!("ConnectTimeout={}", SSH_TIMEOUT))
-        .arg("-o")
-        .arg("BatchMode=yes")
-        .arg(alias)
-        .arg("echo $HOME")
-        .creation_flags(CREATE_NO_WINDOW)
-        .stdin(Stdio::null())
-        .output()
-        .ok()?;
+    let out = ssh_cmd("ssh").arg(alias).arg("echo $HOME").output().ok()?;
     if !out.status.success() {
         log(&format!(
             "remote_home failed: {}",
@@ -188,16 +217,12 @@ fn remote_home(alias: &str) -> Option<String> {
 
 fn run_ssh(alias: &str, remote_cmd: &str) -> bool {
     log(&format!("ssh {} \"{}\"", alias, remote_cmd));
-    Command::new("ssh")
-        .arg("-o")
-        .arg(format!("ConnectTimeout={}", SSH_TIMEOUT))
-        .arg("-o")
-        .arg("BatchMode=yes")
-        .arg(alias)
-        .arg(remote_cmd)
-        .creation_flags(CREATE_NO_WINDOW)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
+    silent_ok(ssh_cmd("ssh").arg(alias).arg(remote_cmd))
+}
+
+/// Run to completion with output discarded; true only on exit status 0.
+fn silent_ok(cmd: &mut Command) -> bool {
+    cmd.stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
         .map(|s| s.success())
@@ -208,19 +233,5 @@ fn run_scp(local: &Path, alias: &str, remote: &str) -> bool {
     // Modern OpenSSH scp uses the SFTP protocol: the remote path is taken
     // literally (NOT shell-expanded), so it must NOT be quoted, or the quotes
     // become part of the filename. Sanitized names never contain spaces.
-    let target = format!("{}:{}", alias, remote);
-    Command::new("scp")
-        .arg("-o")
-        .arg(format!("ConnectTimeout={}", SSH_TIMEOUT))
-        .arg("-o")
-        .arg("BatchMode=yes")
-        .arg(local)
-        .arg(&target)
-        .creation_flags(CREATE_NO_WINDOW)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    silent_ok(ssh_cmd("scp").arg(local).arg(format!("{}:{}", alias, remote)))
 }

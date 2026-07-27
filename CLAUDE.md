@@ -21,7 +21,7 @@ shares the `CursorDrop.ini` format and behavior but no code with the Rust crate.
 Shipping build runs on Windows (MSVC, static CRT → standalone exe):
 
 ```powershell
-cargo build --release     # -> target\release\CursorDrop.exe (~340 KB)
+cargo build --release     # -> target\release\CursorDrop.exe
 cargo test                # unit tests (config parser, util)
 cargo test parses_multiple_servers_in_order   # a single test
 ```
@@ -45,8 +45,7 @@ Linux, extract `parse()` + its `#[cfg(test)]` module into a standalone file and
 Single-threaded Win32 message loop on the main thread; **all SSH/scp work runs
 on spawned worker threads** so the UI never blocks. Worker threads report
 progress back via `set_state()` → `PostMessageW(WM_APP_STATE)`, which the
-window proc repaints. State machine: `Idle / Reading / Uploading / Success /
-Error`, each with its own color palette; Success/Error auto-revert to Idle on a
+window proc repaints. State machine: `Idle / Uploading / Success / Error`, each with its own color palette; Success/Error auto-revert to Idle on a
 timer.
 
 Module responsibilities:
@@ -55,7 +54,7 @@ Module responsibilities:
 |------|------|
 | `src/main.rs` | Win32 window/WndProc, right-click menu, state machine, input, CLI mode |
 | `src/config.rs` | `CursorDrop.ini` parse/default-create → `Vec<Server>` |
-| `src/upload.rs` | remote `$HOME` resolve + path calc + clipboard + `ssh`/`scp` (worker thread) |
+| `src/upload.rs` | remote `$HOME` resolve + path calc + clipboard + `ssh`/`scp` + guarded remote flush (worker thread) |
 | `src/clipboard.rs` | clipboard file list / bitmap (GDI+ → PNG) + set text |
 | `src/sys.rs` | UTF-16 conversion, timestamps, log/ini/clip paths (Windows-only) |
 | `src/util.rs` | pure string logic (shell-quote, filename sanitize) + tests |
@@ -85,7 +84,7 @@ parsing) — those parity points are listed in `android/README.md`.
 
 Differs from the desktop app in how the active server is handled: it **is**
 persisted (to `~/.config/cursor-drop/active`), unlike the Rust app's session-only
-`ACTIVE`. Subcommands: `list` / `pick` / `use <name>` / `flush`; `CURSOR_DROP_PROMPT=1`
+`ACTIVE`. Subcommands: `upload <file>...` / `list` / `pick` / `use <name>` / `flush`; `CURSOR_DROP_PROMPT=1`
 asks per-share without changing the saved active. No native build/test — it's a
 script; test by running `cursor-drop.sh <file>` under Termux (needs `openssh` +
 `termux-api`).
@@ -102,3 +101,9 @@ script; test by running `cursor-drop.sh <file>` under Termux (needs `openssh` +
   keep it that way. A server is dropped if it has no `Alias`; `RemoteDir` defaults
   when omitted; `load()` guarantees at least one server.
 - Remote `$HOME` is queried once per alias and cached (for `~` expansion).
+- **Flush is `rm -f <dir>/*`** — top level only, always confirmed in the UI, and
+  refused when the resolved dir is shorter than 2 chars or equals the remote
+  `$HOME`. Keep both guards if you touch it.
+- One transfer at a time: `upload::BUSY` gates `handle_files`/`flush`, and the
+  busy path must stay log-only (setting state would arm the revert timer and
+  blank the in-flight transfer).

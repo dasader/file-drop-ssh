@@ -29,7 +29,7 @@ AutoHotkey v2 스크립트(`CursorDrop v4`)를 **Rust + windows-sys**로 포팅�
 - 백그라운드 스레드에서 `mkdir -p` + `touch` + `scp` (모두 `BatchMode=yes`)
 - 우클릭 메뉴 (서버 선택 / Paste / Flush remote files / Show log / Exit)
 - **다중 서버**: ini에 여러 서버를 정의하고 우클릭 메뉴에서 활성 서버 전환
-- 상태 색상 피드백 (idle / reading / uploading / success / error)
+- 상태 색상 피드백 (idle / uploading / success / error)
 - **CLI 모드**: `CursorDrop.exe <파일> [...]` → GUI 없이 업로드 후 종료
 
 ## 빌드
@@ -38,7 +38,7 @@ AutoHotkey v2 스크립트(`CursorDrop v4`)를 **Rust + windows-sys**로 포팅�
 cargo build --release
 ```
 
-산출물: `target\release\CursorDrop.exe` (약 **340 KB**, 단독 실행).
+산출물: `target\release\CursorDrop.exe` (단독 실행).
 MSVC 정적 CRT 링크(`.cargo/config.toml`) → `vcredist` 불필요. 참조 DLL은 전부
 Windows 표준(kernel32 / user32 / gdi32 / gdiplus / shell32 / advapi32).
 
@@ -95,7 +95,7 @@ RemoteDir=~/uploads
 | `src/sys.rs` | UTF-16 변환·타임스탬프·로그·경로 |
 | `src/config.rs` | `CursorDrop.ini` 로드/기본생성 + 다중 서버 파서(단위 테스트) |
 | `src/clipboard.rs` | 클립보드 파일/비트맵(GDI+ PNG) + 텍스트 설정 |
-| `src/upload.rs` | 원격 `$HOME` 해석 + 경로계산 + 클립보드 + scp(워커 스레드) |
+| `src/upload.rs` | 원격 `$HOME` 해석 + 경로계산 + 클립보드 + scp + 원격 flush(워커 스레드) |
 | `src/main.rs` | 윈도/WndProc/우클릭 메뉴/상태머신/입력/CLI |
 
 테스트: `cargo test`.
@@ -141,6 +141,7 @@ cp android/CursorDrop.ini ~/.config/cursor-drop/CursorDrop.ini   # Alias/RemoteD
 데스크톱 앱과 달리 활성 서버가 **저장**된다(`~/.config/cursor-drop/active`).
 
 ```bash
+cursor-drop.sh upload a.png # 명시적 업로드(기본 동작과 동일)
 cursor-drop.sh list        # 서버 목록, '*' 가 활성
 cursor-drop.sh pick        # 라디오 다이얼로그로 선택
 cursor-drop.sh use dev     # 이름으로 활성 지정

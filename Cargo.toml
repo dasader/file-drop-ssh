@@ -2,7 +2,7 @@
 name = "cursordrop"
 version = "0.2.0"
 edition = "2021"
-description = "Drag files / paste clipboard images -> SCP to remote -> auto-paste path into editor"
+description = "Drag files / paste clipboard images -> SCP to remote -> remote path on the clipboard"
 
 [[bin]]
 name = "CursorDrop"
