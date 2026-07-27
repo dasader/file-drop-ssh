@@ -22,14 +22,14 @@ AutoHotkey v2 스크립트(`CursorDrop v4`)를 **Rust + windows-sys**로 포팅�
 
 ## 핵심 기능
 
-- 항상 위·반투명·둥근 모서리 알약 위젯 (드래그로 이동, 다크/라이트 자동)
+- 항상 위·둥근 모서리 위젯 (드래그로 이동, 다크/라이트 자동, **per-monitor DPI** 대응)
 - **드래그 드롭** → 업로드
 - **Ctrl+V** (위젯 포커스 상태) → 클립보드 파일 / 비트맵 이미지(PNG 변환) 업로드
 - 원격 `$HOME` 1회 조회로 `~` → 절대경로 변환 (캐시)
 - 백그라운드 스레드에서 `mkdir -p` + `touch` + `scp` (모두 `BatchMode=yes`)
 - 우클릭 메뉴 (서버 선택 / Paste / Flush remote files / Show log / Exit)
 - **다중 서버**: ini에 여러 서버를 정의하고 우클릭 메뉴에서 활성 서버 전환
-- 상태 색상 피드백 (idle / uploading / success / error)
+- 상태 표시: 좌측 액센트 레일 색 + 전송 중 하단 진행 막대 (idle / uploading / success / error)
 - **CLI 모드**: `CursorDrop.exe <파일> [...]` → GUI 없이 업로드 후 종료
 
 ## 빌드
@@ -64,8 +64,6 @@ RemoteDir=~/uploads
 - **활성 서버**: 파일에 나열된 **첫 번째 서버**가 기본 활성. 우클릭 메뉴에서
   다른 서버를 고르면 활성 전환된다(체크 표시). 이 선택은 **세션 동안만** 유지되며
   ini에 다시 쓰지 않는다 — 재시작하면 첫 서버로 돌아간다.
-- **하위호환**: 기존 단일 `[Remote]` 섹션도 그대로 인식된다(이름 `Remote`인
-  서버 하나로 취급).
 
 ## 사용
 

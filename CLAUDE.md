@@ -45,8 +45,17 @@ Linux, extract `parse()` + its `#[cfg(test)]` module into a standalone file and
 Single-threaded Win32 message loop on the main thread; **all SSH/scp work runs
 on spawned worker threads** so the UI never blocks. Worker threads report
 progress back via `set_state()` → `PostMessageW(WM_APP_STATE)`, which the
-window proc repaints. State machine: `Idle / Uploading / Success / Error`, each with its own color palette; Success/Error auto-revert to Idle on a
-timer.
+window proc repaints. State machine: `Idle / Uploading / Success / Error`;
+Success/Error auto-revert to Idle on a timer.
+
+**Look**: one surface colour per theme (never per state) — the state is carried
+by the accent rail left of the text and by the progress bar along the bottom
+edge while files move. Every shape is a rectangle because GDI cannot antialias;
+the only curve is the window region. All geometry is written in 96-dpi units and
+goes through `px()`; the process is per-monitor-dpi aware (`SetProcessDpiAwarenessContext`
+at startup, `apply_dpi()` on `WM_DPICHANGED`), which is what keeps text sharp on
+a scaled display. Do not re-add `WS_EX_LAYERED`: alpha on the window costs
+ClearType, which is what made the text look soft before.
 
 Module responsibilities:
 
@@ -59,8 +68,8 @@ Module responsibilities:
 | `src/sys.rs` | UTF-16 conversion, timestamps, log/ini/clip paths (Windows-only) |
 | `src/util.rs` | pure string logic (shell-quote, filename sanitize) + tests |
 
-**Multi-server flow**: `config::load()` reads all `[Server:<name>]` sections (and
-the legacy `[Remote]` section) into `Vec<Server>`, loaded once into the `SERVERS`
+**Multi-server flow**: `config::load()` reads all `[Server:<name>]` sections
+into `Vec<Server>`, loaded once into the `SERVERS`
 `OnceLock` in main.rs. The active server is an `AtomicUsize` (`ACTIVE`), **session-only
 — never written back to the ini**; defaults to the first server. The right-click
 menu lists servers (checkmark on active) when there's more than one; selecting one

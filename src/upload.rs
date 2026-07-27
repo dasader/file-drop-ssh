@@ -42,7 +42,7 @@ pub fn handle_files(files: Vec<PathBuf>, server: Server) {
         log("Busy — a transfer is already running");
         return;
     }
-    crate::set_state(StateKind::Uploading, "Preparing...");
+    crate::set_state(StateKind::Uploading, "Preparing", &server.name);
     std::thread::spawn(move || {
         run(files, &server);
         BUSY.store(false, Ordering::SeqCst);
@@ -56,7 +56,7 @@ static BUSY: AtomicBool = AtomicBool::new(false);
 pub fn run(files: Vec<PathBuf>, server: &Server) -> bool {
     let files: Vec<PathBuf> = files.into_iter().filter(|p| p.exists()).collect();
     if files.is_empty() {
-        crate::set_state(StateKind::Error, "No files");
+        crate::set_state(StateKind::Error, "No files", "Nothing readable in that drop");
         return false;
     }
 
@@ -68,7 +68,7 @@ pub fn run(files: Vec<PathBuf>, server: &Server) -> bool {
     let remote_dir = match resolve_remote_dir(&server.alias, &server.remote_dir) {
         Some(d) => d,
         None => {
-            crate::set_state(StateKind::Error, "Remote unreachable");
+            crate::set_state(StateKind::Error, "Host unreachable", &server.alias);
             return false;
         }
     };
@@ -92,7 +92,7 @@ pub fn run(files: Vec<PathBuf>, server: &Server) -> bool {
         .join(" ");
     // The path on the clipboard IS the deliverable — no point uploading without it.
     if !set_clipboard_text(&payload) {
-        crate::set_state(StateKind::Error, "Clipboard failed");
+        crate::set_state(StateKind::Error, "Clipboard is busy", "Nothing was sent");
         log("Clipboard set failed");
         return false;
     }
@@ -108,7 +108,7 @@ pub fn run(files: Vec<PathBuf>, server: &Server) -> bool {
         remote_cmd.push_str(&shell_quote(r));
     }
     if !run_ssh(&server.alias, &remote_cmd) {
-        crate::set_state(StateKind::Error, "Remote prep failed");
+        crate::set_state(StateKind::Error, "Remote setup failed", &server.alias);
         return false;
     }
 
@@ -117,9 +117,11 @@ pub fn run(files: Vec<PathBuf>, server: &Server) -> bool {
         let fname = local.file_name().unwrap_or_default().to_string_lossy();
         crate::set_state(
             StateKind::Uploading,
-            &format!("Syncing {}/{} {}", i + 1, total, fname),
+            &format!("Sending {}/{}", i + 1, total),
+            &fname,
         );
         if run_scp(local, &server.alias, remote) {
+            crate::set_progress(i + 1, total);
             log(&format!("OK: {} -> {}", local.display(), remote));
         } else {
             log(&format!("FAIL scp: {}", local.display()));
@@ -128,11 +130,19 @@ pub fn run(files: Vec<PathBuf>, server: &Server) -> bool {
     }
 
     if fails > 0 {
-        crate::set_state(StateKind::Error, &format!("{} upload(s) failed", fails));
+        crate::set_state(
+            StateKind::Error,
+            &format!("{} of {} failed", fails, total),
+            "See the log",
+        );
         false
     } else {
         let s = if total > 1 { "s" } else { "" };
-        crate::set_state(StateKind::Success, &format!("{} file{} ready", total, s));
+        crate::set_state(
+            StateKind::Success,
+            "Path copied",
+            &format!("{} file{} · Ctrl+Shift+V", total, s),
+        );
         true
     }
 }
@@ -147,7 +157,7 @@ pub fn flush(server: Server) {
         log("Busy — a transfer is already running");
         return;
     }
-    crate::set_state(StateKind::Uploading, "Flushing...");
+    crate::set_state(StateKind::Uploading, "Clearing remote", &server.name);
     std::thread::spawn(move || {
         run_flush(&server);
         BUSY.store(false, Ordering::SeqCst);
@@ -158,21 +168,21 @@ fn run_flush(server: &Server) {
     let dir = match resolve_remote_dir(&server.alias, &server.remote_dir) {
         Some(d) => d,
         None => {
-            crate::set_state(StateKind::Error, "Remote unreachable");
+            crate::set_state(StateKind::Error, "Host unreachable", &server.alias);
             return;
         }
     };
     // Never let a stray config turn this into `rm -f /*` or wipe $HOME.
     if dir.len() < 2 || Some(&dir) == remote_home(&server.alias).as_ref() {
         log(&format!("Flush refused for unsafe remote dir: {}", dir));
-        crate::set_state(StateKind::Error, "Unsafe RemoteDir");
+        crate::set_state(StateKind::Error, "Unsafe RemoteDir", &dir);
         return;
     }
     // Quotes cover the dir; the glob stays outside so the remote shell expands it.
     if run_ssh(&server.alias, &format!("rm -f {}/*", shell_quote(&dir))) {
-        crate::set_state(StateKind::Success, "Remote flushed");
+        crate::set_state(StateKind::Success, "Remote cleared", &server.name);
     } else {
-        crate::set_state(StateKind::Error, "Flush failed");
+        crate::set_state(StateKind::Error, "Clear failed", &server.alias);
     }
 }
 

@@ -102,8 +102,7 @@ cursor-drop.sh file1.png file2.png                 # multiple files
 - **scp quoting**: the remote path is passed **unquoted** (modern OpenSSH scp
   uses SFTP and takes it literally); the clipboard payload single-quotes each
   path so it pastes as a literal absolute path.
-- **Multi-server**: `[Server:<name>]` sections + the legacy `[Remote]` section;
-  a server with no `Alias` is dropped; `RemoteDir` defaults to
+- **Multi-server**: `[Server:<name>]` sections; a server with no `Alias` is dropped; `RemoteDir` defaults to
   `~/.cursor-drop-files` when omitted.
 - **Divergence**: when the ini yields no usable server the desktop app falls back
   to a synthetic default; here it exits with `no server with an Alias in <ini>`,
