@@ -19,11 +19,11 @@ use std::sync::{Mutex, OnceLock};
 
 use config::Server;
 
-use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, CreatePen,
     CreateRoundRectRgn, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, EndPaint, FillRect,
-    GetStockObject, InvalidateRect, RoundRect, SelectObject, SetBkMode, SetTextColor, SetWindowRgn,
+    GetStockObject, GetTextExtentPoint32W, InvalidateRect, RoundRect, SelectObject, SetBkMode, SetTextColor, SetWindowRgn,
     DT_END_ELLIPSIS, DT_LEFT, DT_SINGLELINE, DT_VCENTER, HDC, HFONT, NULL_BRUSH, PAINTSTRUCT,
     PS_SOLID, SRCCOPY,
 };
@@ -53,7 +53,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 // Layout in 96-dpi units; everything on screen goes through px().
-const PILL_W: i32 = 216;
+const PILL_W: i32 = 232;
 const PILL_H: i32 = 64;
 const RADIUS: i32 = 16;
 const PAD: i32 = 16;
@@ -62,6 +62,8 @@ const RAIL_H: i32 = 30;
 const TEXT_X: i32 = 34;
 const TITLE_H: i32 = 20;
 const SUB_H: i32 = 18;
+/// The alias never squeezes the title below a readable width.
+const ALIAS_MAX: i32 = 78;
 
 const WM_APP_STATE: u32 = WM_APP + 1;
 const TIMER_REVERT: usize = 1;
@@ -70,12 +72,15 @@ const ID_PASTE: usize = 101;
 const ID_LOG: usize = 102;
 const ID_EXIT: usize = 103;
 const ID_FLUSH: usize = 104;
+const ID_INI: usize = 105;
 /// Server menu items get command IDs `ID_SERVER_BASE + index`.
 const ID_SERVER_BASE: usize = 200;
 
 #[derive(Clone, Copy)]
 pub enum StateKind {
     Idle,
+    /// The ini is still the generated placeholder — nothing can be sent yet.
+    Setup,
     Uploading,
     Success,
     Error,
@@ -175,7 +180,7 @@ fn do_paste() {
         }
         return;
     }
-    set_state(StateKind::Error, "Nothing to paste", "No files or image on the clipboard");
+    set_state(StateKind::Error, "Nothing to paste", "Clipboard has no files or image");
 }
 
 // ---------------------------------------------------------------------------
@@ -206,6 +211,7 @@ fn palette(kind: StateKind, dark: bool) -> Pal {
     let accent = if dark {
         match kind {
             Idle => (0x55, 0x60, 0x70),
+            Setup => (0x5B, 0x8D, 0xEF),
             Uploading => (0xE0, 0xA6, 0x4A),
             Success => (0x58, 0xC9, 0x8B),
             Error => (0xE4, 0x68, 0x5E),
@@ -213,6 +219,7 @@ fn palette(kind: StateKind, dark: bool) -> Pal {
     } else {
         match kind {
             Idle => (0x9A, 0xA2, 0xAF),
+            Setup => (0x2C, 0x6B, 0xD9),
             Uploading => (0xC8, 0x8A, 0x1E),
             Success => (0x2F, 0xA0, 0x66),
             Error => (0xD0, 0x4A, 0x40),
@@ -242,12 +249,28 @@ fn current_visual() -> (Pal, String, String, f32) {
         let s = STATE.lock().unwrap();
         (s.kind, s.title.clone(), s.sub.clone(), s.progress)
     };
-    let pal = palette(kind, DARK.load(Ordering::Relaxed));
-    // Idle is the one state with nothing to report, so it speaks for itself.
+    let dark = DARK.load(Ordering::Relaxed);
+    // Idle has nothing to report, so it speaks for itself — and says what to do
+    // first when the ini has never been edited. Deriving it here rather than
+    // pushing a state means the prompt also comes back after every auto-revert.
     if title.is_empty() {
-        return (pal, "Drop or paste".into(), "Ctrl+V or drag files here".into(), 0.0);
+        return if active_server().alias == config::PLACEHOLDER_ALIAS {
+            (
+                palette(StateKind::Setup, dark),
+                "Add your server".into(),
+                "Right-click → Edit config".into(),
+                0.0,
+            )
+        } else {
+            (
+                palette(kind, dark),
+                "Drop or paste".into(),
+                "Ctrl+V or drag files here".into(),
+                0.0,
+            )
+        };
     }
-    (pal, title, sub, progress)
+    (palette(kind, dark), title, sub, progress)
 }
 
 unsafe fn make_font(height: i32, weight: i32) -> HFONT {
@@ -255,6 +278,18 @@ unsafe fn make_font(height: i32, weight: i32) -> HFONT {
     CreateFontW(
         height, 0, 0, 0, weight, 0, 0, 0, 1, 0, 0, 5, 0, face.as_ptr(),
     )
+}
+
+/// Width of `text` in the given face, for right-aligning it.
+unsafe fn text_width(hdc: HDC, text: &str, size: i32, weight: i32) -> i32 {
+    let font = make_font(-size, weight);
+    let old = SelectObject(hdc, font);
+    let w = sys::wide(text);
+    let mut sz: SIZE = zeroed();
+    GetTextExtentPoint32W(hdc, w.as_ptr(), (w.len() - 1) as i32, &mut sz);
+    SelectObject(hdc, old);
+    DeleteObject(font);
+    sz.cx
 }
 
 unsafe fn fill(hdc: HDC, x: i32, y: i32, w: i32, h: i32, color: Rgb) {
@@ -323,7 +358,22 @@ unsafe fn paint(hwnd: HWND) {
     SetBkMode(hdc, 1); // TRANSPARENT
     let (left, right) = (px(TEXT_X), w - px(PAD));
     let top = (h - px(TITLE_H + SUB_H)) / 2;
-    draw_line(hdc, &title, (left, top, right, px(TITLE_H)), px(15), 600, pal.title);
+
+    // Which host this is aimed at, right-aligned on the title row — the target
+    // changes from a menu you cannot see, so it belongs in every state.
+    let alias = active_server().alias;
+    let alias_w = text_width(hdc, &alias, px(11), 400).min(px(ALIAS_MAX));
+    draw_line(
+        hdc,
+        &alias,
+        (right - alias_w, top, right, px(TITLE_H)),
+        px(11),
+        400,
+        pal.sub,
+    );
+
+    let title_right = right - alias_w - px(10);
+    draw_line(hdc, &title, (left, top, title_right, px(TITLE_H)), px(15), 600, pal.title);
     let sub_top = top + px(TITLE_H);
     draw_line(hdc, &sub, (left, sub_top, right, px(SUB_H)), px(11), 400, pal.sub);
 
@@ -365,6 +415,7 @@ unsafe fn show_menu(hwnd: HWND) {
     item(MF_STRING, ID_PASTE, "Paste clipboard");
     item(MF_STRING, ID_FLUSH, "Flush remote files");
     sep();
+    item(MF_STRING, ID_INI, "Edit config");
     item(MF_STRING, ID_LOG, "Show log");
     sep();
     item(MF_STRING, ID_EXIT, "Exit");
@@ -388,6 +439,7 @@ unsafe fn show_menu(hwnd: HWND) {
         let idx = cmd - ID_SERVER_BASE;
         ACTIVE.store(idx, Ordering::Relaxed);
         sys::log(&format!("Active server: {}", list[idx].name));
+        repaint();
         return;
     }
     match cmd {
@@ -410,16 +462,17 @@ unsafe fn show_menu(hwnd: HWND) {
                 upload::flush(s);
             }
         }
-        ID_LOG => {
-            let _ = std::process::Command::new("notepad")
-                .arg(sys::log_path())
-                .spawn();
-        }
+        ID_INI => open_in_notepad(sys::config_path()),
+        ID_LOG => open_in_notepad(sys::log_path()),
         ID_EXIT => {
             DestroyWindow(hwnd);
         }
         _ => {}
     }
+}
+
+fn open_in_notepad(path: &std::path::Path) {
+    let _ = std::process::Command::new("notepad").arg(path).spawn();
 }
 
 // ---------------------------------------------------------------------------
@@ -618,15 +671,15 @@ fn main() {
         // letting the compositor scale a 96-dpi bitmap up.
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         DARK.store(detect_dark(), Ordering::Relaxed);
+        let count = servers().len(); // read the ini before the first paint needs it
         let hwnd = create_window();
         HWND_MAIN.store(hwnd as isize, Ordering::SeqCst);
 
-        // Also loads the servers, so the menu is ready before the first click.
         sys::log(&format!(
             "CursorDrop started at {} dpi ({} theme), {} server(s)",
             DPI.load(Ordering::Relaxed),
             if DARK.load(Ordering::Relaxed) { "dark" } else { "light" },
-            servers().len()
+            count
         ));
 
         let mut msg: MSG = zeroed();

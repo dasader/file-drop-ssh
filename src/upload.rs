@@ -68,7 +68,7 @@ pub fn run(files: Vec<PathBuf>, server: &Server) -> bool {
     let remote_dir = match resolve_remote_dir(&server.alias, &server.remote_dir) {
         Some(d) => d,
         None => {
-            crate::set_state(StateKind::Error, "Host unreachable", &server.alias);
+            crate::set_state(StateKind::Error, "Host unreachable", "Check ~/.ssh/config");
             return false;
         }
     };
@@ -108,7 +108,7 @@ pub fn run(files: Vec<PathBuf>, server: &Server) -> bool {
         remote_cmd.push_str(&shell_quote(r));
     }
     if !run_ssh(&server.alias, &remote_cmd) {
-        crate::set_state(StateKind::Error, "Remote setup failed", &server.alias);
+        crate::set_state(StateKind::Error, "Setup failed", "Could not create the remote folder");
         return false;
     }
 
@@ -168,7 +168,7 @@ fn run_flush(server: &Server) {
     let dir = match resolve_remote_dir(&server.alias, &server.remote_dir) {
         Some(d) => d,
         None => {
-            crate::set_state(StateKind::Error, "Host unreachable", &server.alias);
+            crate::set_state(StateKind::Error, "Host unreachable", "Check ~/.ssh/config");
             return;
         }
     };
@@ -182,7 +182,7 @@ fn run_flush(server: &Server) {
     if run_ssh(&server.alias, &format!("rm -f {}/*", shell_quote(&dir))) {
         crate::set_state(StateKind::Success, "Remote cleared", &server.name);
     } else {
-        crate::set_state(StateKind::Error, "Clear failed", &server.alias);
+        crate::set_state(StateKind::Error, "Clear failed", "See the log");
     }
 }
 
