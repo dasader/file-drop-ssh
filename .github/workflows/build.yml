@@ -10,6 +10,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       # MSVC target; .cargo/config.toml statically links the CRT -> standalone exe.
+      - run: cargo test --locked
       - run: cargo build --release --locked
       - uses: actions/upload-artifact@v4
         with:
