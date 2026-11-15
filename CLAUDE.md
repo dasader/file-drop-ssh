@@ -51,7 +51,8 @@ Success/Error auto-revert to Idle on a timer.
 **Look**: one surface colour per theme (never per state) — the state is carried
 by the accent rail left of the text and by the progress bar along the bottom
 edge while files move. The active server's alias sits right-aligned on the title
-row in every state, so the target is never invisible. Every shape is a rectangle because GDI cannot antialias;
+row in every state, so the target is never invisible; it takes the state accent
+(`Pal::alias`), except in Idle, whose dim accent is unreadable at 11px. Every shape is a rectangle because GDI cannot antialias;
 the only curve is the window region. All geometry is written in 96-dpi units and
 goes through `px()`; the process is per-monitor-dpi aware (`SetProcessDpiAwarenessContext`
 at startup, `apply_dpi()` on `WM_DPICHANGED`), which is what keeps text sharp on
@@ -122,3 +123,10 @@ script; test by running `cursor-drop.sh <file>` under Termux (needs `openssh` +
 - One transfer at a time: `upload::BUSY` gates `handle_files`/`flush`, and the
   busy path must stay log-only (setting state would arm the revert timer and
   blank the in-flight transfer).
+- **Release profile is `panic = "abort"`** (plus `opt-level="z"`, LTO, strip):
+  a panic on a worker thread kills the whole widget, not just the transfer.
+  Report failures via `set_state(Error, …)` instead of `unwrap()` on I/O.
+- Static CRT comes from `.cargo/config.toml` and applies only to the
+  `x86_64-pc-windows-msvc` target; the gnu cross-build is for checking, not shipping.
+- Dark/light theme is read once at startup from the registry
+  (`AppsUseLightTheme`); switching the Windows theme needs an app restart.

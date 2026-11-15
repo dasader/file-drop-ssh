@@ -204,6 +204,8 @@ struct Pal {
     title: Rgb,
     sub: Rgb,
     accent: Rgb,
+    /// Colour of the server alias: the state colour, except Idle.
+    alias: Rgb,
 }
 
 fn palette(kind: StateKind, dark: bool) -> Pal {
@@ -225,21 +227,25 @@ fn palette(kind: StateKind, dark: bool) -> Pal {
             Error => (0xD0, 0x4A, 0x40),
         }
     };
+    let sub = if dark { (0x8C, 0x89, 0x96) } else { (0x74, 0x71, 0x7C) };
+    let alias = if matches!(kind, Idle) { sub } else { accent };
     if dark {
         Pal {
             surface: (0x1A, 0x1A, 0x1F),
             border: (0x30, 0x30, 0x3A),
             title: (0xF1, 0xF0, 0xF4),
-            sub: (0x8C, 0x89, 0x96),
+            sub,
             accent,
+            alias,
         }
     } else {
         Pal {
             surface: (0xFF, 0xFF, 0xFF),
             border: (0xDE, 0xDC, 0xE2),
             title: (0x16, 0x15, 0x1A),
-            sub: (0x74, 0x71, 0x7C),
+            sub,
             accent,
+            alias,
         }
     }
 }
@@ -361,15 +367,18 @@ unsafe fn paint(hwnd: HWND) {
 
     // Which host this is aimed at, right-aligned on the title row — the target
     // changes from a menu you cannot see, so it belongs in every state.
+    // It takes the state colour so it reads as part of the rail's signal; Idle's
+    // accent is a deliberately dim grey, too faint for 11px text, so Idle keeps
+    // the sub colour. Semibold because thin coloured text loses its hue.
     let alias = active_server().alias;
-    let alias_w = text_width(hdc, &alias, px(11), 400).min(px(ALIAS_MAX));
+    let alias_w = text_width(hdc, &alias, px(11), 600).min(px(ALIAS_MAX));
     draw_line(
         hdc,
         &alias,
         (right - alias_w, top, right, px(TITLE_H)),
         px(11),
-        400,
-        pal.sub,
+        600,
+        pal.alias,
     );
 
     let title_right = right - alias_w - px(10);
